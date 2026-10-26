@@ -1,0 +1,72 @@
+name: FluentUp CI & Release Quality Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  backend-checks:
+    name: Backend FastAPI Pytest & Schema Validation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+          cache-dependency-path: apps/backend/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Backend Integration & Security Tests
+        env:
+          ENVIRONMENT: test
+          PYTHONPATH: .
+        run: pytest tests -v
+
+  mobile-checks:
+    name: Mobile Expo TypeScript, Tests & Config Validation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: apps/mobile/package-lock.json
+
+      - name: Install dependencies with lockfile
+        run: npm ci
+
+      - name: TypeScript Strict Typecheck
+        run: npm run typecheck
+
+      - name: Run Mobile Jest Test Suite
+        run: npm test -- --ci
+
+      - name: Validate Production Expo Config (Target SDK 36 & Package ID)
+        env:
+          APP_ENV: production
+          EXPO_PUBLIC_APP_ENV: production
+          APP_PACKAGE_ID: com.fluentup.app
+        run: npx expo config --type public

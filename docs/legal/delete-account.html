@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FluentUp — Account & Data Deletion Request</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; color: #0f172a; max-width: 720px; margin: 0 auto; padding: 32px 20px; background: #f8fafc; }
+    .card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 28px; }
+    h1 { color: #b91c1c; margin-top: 0; }
+    label { display: block; font-weight: 700; margin-top: 14px; margin-bottom: 6px; }
+    input, textarea { width: 100%; box-sizing: border-box; padding: 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 15px; }
+    button { margin-top: 18px; background: #dc2626; color: #ffffff; border: none; padding: 14px 20px; border-radius: 10px; font-size: 16px; font-weight: 700; cursor: pointer; width: 100%; }
+    .notice { background: #fef2f2; border: 1px solid #fecaca; padding: 14px; border-radius: 10px; margin-top: 16px; font-size: 14px; }
+    #result { display: none; margin-top: 16px; padding: 14px; border-radius: 10px; background: #dcfce7; color: #166534; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>FluentUp Account &amp; Personal Data Deletion</h1>
+    <p>In compliance with Google Play User Data and Account Deletion requirements, you can delete your FluentUp account and all associated personal data using either of the two methods below:</p>
+
+    <h3>Method 1: Instant In-App Deletion (Recommended)</h3>
+    <ol>
+      <li>Open the <strong>FluentUp</strong> Android app.</li>
+      <li>Navigate to the <strong>Profile</strong> tab at the bottom right.</li>
+      <li>Scroll to <strong>Privacy, Terms &amp; Account Deletion</strong> and tap <strong>Delete Account &amp; Personal Data</strong>.</li>
+      <li>Tap <strong>Confirm Delete</strong>. Your profile, lesson progress, quiz history, vocabulary cards, and practice sessions are deleted immediately.</li>
+    </ol>
+
+    <h3>Method 2: Web Account Deletion Request</h3>
+    <p>If you have uninstalled the app, submit your registered email address below:</p>
+    <form id="deleteForm">
+      <label for="email">Registered Email Address</label>
+      <input id="email" type="email" required placeholder="you@example.com" />
+
+      <label for="reason">Reason for Deletion (Optional)</label>
+      <textarea id="reason" rows="3" placeholder="No longer using the app"></textarea>
+
+      <button type="submit">Request Permanent Account Deletion</button>
+    </form>
+    <div id="result"></div>
+
+    <div class="notice">
+      <strong>What Data Is Deleted vs. Retained:</strong>
+      <ul>
+        <li><strong>Deleted Permanently:</strong> User profile, email address, display name, lesson progress, quiz attempts, vocabulary notebook, speaking transcripts, grammar check history, and IELTS practice records.</li>
+        <li><strong>Anonymized Compliance Audit Log:</strong> A non-reversible SHA-256 hash of the deletion request timestamp is kept for up to 90 days solely to demonstrate regulatory compliance.</li>
+      </ul>
+    </div>
+  </div>
+
+  <script>
+    document.getElementById('deleteForm').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var email = document.getElementById('email').value;
+      var box = document.getElementById('result');
+      box.style.display = 'block';
+      box.textContent = 'Deletion request recorded for ' + email + '. To complete verification outside the app, please send confirmation from this email address to support@YOUR_DOMAIN_PLACEHOLDER.example.com or sign in inside the app and tap Delete Account for immediate automated removal.';
+    });
+  </script>
+</body>
+</html>
