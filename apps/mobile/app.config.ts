@@ -12,6 +12,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: 'FluentUp',
   slug: 'fluentup',
+  owner: 'roybipro',
   version: VERSION_NAME,
   orientation: 'portrait',
   icon: './assets/icon.png',
@@ -56,6 +57,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     typedRoutes: true,
   },
   extra: {
+    eas: {
+      projectId: '0ab79c56-e7a5-4a7b-b211-295c85390342',
+    },
     appEnv: APP_ENV,
     isProduction: IS_PRODUCTION,
     packageId: PACKAGE_ID,
