@@ -1,0 +1,65 @@
+# Node / Expo / React Native
+node_modules/
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.keystore
+*.aab
+*.apk
+
+# Metro
+.metro-health-check*
+
+# Debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# Env & Secrets (NEVER COMMIT SECRETS)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.staging
+.env.production
+apps/mobile/.env
+apps/backend/.env
+google-services.json
+GoogleService-Info.plist
+service-account*.json
+
+# Python / FastAPI
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.coverage
+htmlcov/
+*.db
+*.sqlite3
+
+# Android native build outputs
+apps/mobile/android/app/build/
+apps/mobile/android/.gradle/
+apps/mobile/android/local.properties
+apps/mobile/android/keystores/*.jks
+apps/mobile/android/keystores/*.keystore
+apps/mobile/android/keystore.properties
+
+# Test & coverage artifacts
+coverage/
