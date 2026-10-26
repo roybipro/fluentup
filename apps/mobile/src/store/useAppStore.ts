@@ -4,7 +4,6 @@ import {
   ExplanationLanguage,
   GrammarCheckResult,
   IELTSEvaluation,
-  LearningGoal,
   OnboardingPreferences,
   ProficiencyLevel,
   VocabularyCard,

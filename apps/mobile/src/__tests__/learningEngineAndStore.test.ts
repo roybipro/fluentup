@@ -13,7 +13,6 @@ import {
   findLessonById,
   getDueVocabularyCards,
   isLessonUnlocked,
-  scoreLessonQuiz,
 } from '../services/learningEngine';
 import { useAppStore } from '../store/useAppStore';
 
