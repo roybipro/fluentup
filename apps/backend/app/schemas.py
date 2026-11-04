@@ -21,6 +21,16 @@ class AuthLoginRequest(BaseModel):
     password: str = Field(..., min_length=8, max_length=128)
 
 
+class AuthRecoverRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=255)
+
+
+class AuthRecoverConfirmRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=255)
+    code: str = Field(..., min_length=6, max_length=10)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
 class AuthResponse(BaseModel):
     user_id: str
     email: str

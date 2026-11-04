@@ -9,7 +9,13 @@ import {
   View,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { getApiBaseUrl } from '../src/services/apiClient';
+import {
+  confirmPasswordReset,
+  register,
+  requestPasswordReset,
+  signIn,
+  SignedInAccount,
+} from '../src/services/authApi';
 import { useAppStore } from '../src/store/useAppStore';
 import { useThemePalette } from '../src/theme/colors';
 
@@ -25,6 +31,8 @@ export default function AuthScreen() {
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [resetCode, setResetCode] = useState('');
+  const [resetCodeSent, setResetCodeSent] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
@@ -37,7 +45,12 @@ export default function AuthScreen() {
       setErrorMessage('Please enter a valid email address.');
       return false;
     }
-    if (mode !== 'recovery' && password.length < 8) {
+    const needsPassword = mode !== 'recovery' || resetCodeSent;
+    if (mode === 'recovery' && resetCodeSent && !resetCode.trim()) {
+      setErrorMessage('Please enter the reset code from your email.');
+      return false;
+    }
+    if (needsPassword && password.length < 8) {
       setErrorMessage('Password must be at least 8 characters long.');
       return false;
     }
@@ -50,44 +63,42 @@ export default function AuthScreen() {
     try {
       const trimmedEmail = email.trim().toLowerCase();
       if (mode === 'recovery') {
-        try {
-          await fetch(`${getApiBaseUrl()}/auth/recover`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email: trimmedEmail }),
-          });
-        } catch {
-          // Even if offline, provide clear instruction
+        if (resetCodeSent) {
+          const message = await confirmPasswordReset(trimmedEmail, resetCode.trim(), password);
+          setMode('login');
+          setResetCodeSent(false);
+          setResetCode('');
+          setPassword('');
+          setInfoMessage(message);
+        } else {
+          const message = await requestPasswordReset(trimmedEmail);
+          setResetCodeSent(true);
+          setPassword('');
+          setInfoMessage(message);
         }
-        setInfoMessage(
-          `If an account exists for ${trimmedEmail}, a password reset link has been dispatched via Supabase Auth.`
-        );
         return;
       }
 
-      const endpoint = mode === 'register' ? '/auth/register' : '/auth/login';
-      const res = await fetch(`${getApiBaseUrl()}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: trimmedEmail,
-          password,
-          display_name: displayName.trim() || 'Learner',
-        }),
-      });
-
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody.detail || `Authentication failed (${res.status})`);
+      let account: SignedInAccount;
+      if (mode === 'register') {
+        const result = await register(trimmedEmail, password, displayName.trim() || 'Learner');
+        if (result.status === 'confirmation_required') {
+          setMode('login');
+          setPassword('');
+          setInfoMessage(result.message);
+          return;
+        }
+        account = result.account;
+      } else {
+        account = await signIn(trimmedEmail, password);
       }
 
-      const data = await res.json();
       signInUser({
-        userId: data.user_id,
-        email: data.email,
-        displayName: data.display_name || displayName.trim() || 'Learner',
-        accessToken: data.access_token,
-        expiresAt: Date.now() + (data.expires_in || 3600) * 1000,
+        userId: account.userId,
+        email: account.email,
+        displayName: account.displayName,
+        accessToken: account.accessToken,
+        expiresAt: Date.now() + account.expiresIn * 1000,
         isGuest: false,
       });
       router.replace('/(tabs)');
@@ -129,6 +140,7 @@ export default function AuthScreen() {
               ]}
               onPress={() => {
                 setMode(m);
+                setResetCodeSent(false);
                 setErrorMessage(null);
                 setInfoMessage(null);
               }}
@@ -166,10 +178,26 @@ export default function AuthScreen() {
           placeholderTextColor={palette.textSecondary}
         />
 
-        {mode !== 'recovery' && (
+        {mode === 'recovery' && resetCodeSent && (
+          <>
+            <Text style={[styles.label, { color: palette.textPrimary }]}>Reset Code from Email</Text>
+            <TextInput
+              accessibilityLabel="Reset Code Input"
+              autoCapitalize="none"
+              keyboardType="number-pad"
+              style={[styles.input, { borderColor: palette.border, color: palette.textPrimary }]}
+              value={resetCode}
+              onChangeText={setResetCode}
+              placeholder="123456"
+              placeholderTextColor={palette.textSecondary}
+            />
+          </>
+        )}
+
+        {(mode !== 'recovery' || resetCodeSent) && (
           <>
             <Text style={[styles.label, { color: palette.textPrimary }]}>
-              Password (minimum 8 characters)
+              {mode === 'recovery' ? 'New Password' : 'Password'} (minimum 8 characters)
             </Text>
             <TextInput
               accessibilityLabel="Password Input"
@@ -202,7 +230,9 @@ export default function AuthScreen() {
               ? 'Submit Sign In'
               : mode === 'register'
               ? 'Submit Registration'
-              : 'Send Password Recovery Email'
+              : resetCodeSent
+              ? 'Set New Password'
+              : 'Send Password Reset Code'
           }
           disabled={loading}
           style={[styles.primaryBtn, { backgroundColor: palette.primary }]}
@@ -216,7 +246,9 @@ export default function AuthScreen() {
                 ? 'Sign In'
                 : mode === 'register'
                 ? 'Create Account'
-                : 'Send Reset Link'}
+                : resetCodeSent
+                ? 'Set New Password'
+                : 'Send Reset Code'}
             </Text>
           )}
         </TouchableOpacity>

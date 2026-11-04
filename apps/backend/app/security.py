@@ -1,7 +1,7 @@
 import hashlib
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Dict, List, Optional
 import jwt
 from fastapi import Depends, HTTPException, Request, status
@@ -12,6 +12,9 @@ from app.database import get_db
 from app.models import Profile
 
 security_scheme = HTTPBearer(auto_error=False)
+
+ASYMMETRIC_ALGORITHMS = {"ES256", "RS256"}
+JWKS_CACHE_SECONDS = 600
 
 # Revoked tokens set (in-memory for immediate logout/deletion revocation + DB profile check)
 REVOKED_TOKENS: set[str] = set()
@@ -39,16 +42,33 @@ def check_rate_limit(client_key: str, max_per_minute: Optional[int] = None) -> N
     RATE_LIMIT_STORE[client_key] = history
 
 
-def create_access_token(user_id: str, email: str, expires_seconds: int = 3600) -> str:
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": user_id,
-        "email": email,
-        "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(seconds=expires_seconds)).timestamp()),
-        "aud": "authenticated",
-    }
-    return jwt.encode(payload, settings.supabase_jwt_secret, algorithm="HS256")
+@lru_cache(maxsize=1)
+def _jwks_client(url: str) -> jwt.PyJWKClient:
+    return jwt.PyJWKClient(url, cache_keys=True, lifespan=JWKS_CACHE_SECONDS, timeout=5)
+
+
+def verify_access_token(token: str) -> dict:
+    """
+    Verifies a Supabase access token. The key comes from the algorithm's own trust source, so a
+    token cannot choose how it is checked: asymmetric tokens use the project's public keys, and
+    HS256 is accepted only when a real shared secret is configured.
+    """
+    algorithm = jwt.get_unverified_header(token).get("alg")
+    if algorithm in ASYMMETRIC_ALGORITHMS and settings.supabase_url:
+        key = _jwks_client(settings.supabase_jwks_url).get_signing_key_from_jwt(token).key
+    elif algorithm == "HS256" and settings.usable_jwt_secret:
+        key = settings.usable_jwt_secret
+    else:
+        raise jwt.InvalidTokenError("Unsupported token signature")
+
+    return jwt.decode(
+        token,
+        key,
+        algorithms=[algorithm],
+        audience="authenticated",
+        issuer=settings.supabase_issuer,
+        options={"require": ["exp", "sub", "aud", "iss"]},
+    )
 
 
 def revoke_token(token: str) -> None:
@@ -85,18 +105,18 @@ def get_current_user(
         )
 
     try:
-        payload = jwt.decode(
-            token,
-            settings.supabase_jwt_secret,
-            algorithms=["HS256"],
-            options={"verify_aud": False},
+        payload = verify_access_token(token)
+    except jwt.PyJWKClientConnectionError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to verify your session right now. Please try again.",
         )
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session token has expired",
         )
-    except jwt.InvalidTokenError:
+    except (jwt.InvalidTokenError, jwt.PyJWKClientError):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token",

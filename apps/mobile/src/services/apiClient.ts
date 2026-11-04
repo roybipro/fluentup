@@ -159,12 +159,10 @@ export async function requestServerAccountDeletion(reason: string): Promise<{ de
       message: 'Your FluentUp account, personal profile, and associated learning history have been deleted.',
     };
   } catch {
-    // Even if server is offline during dev/test, purge local credentials & state and report honestly
-    await useAppStore.getState().deleteAccountAndPurgeData();
+    // Keep the session so the user can retry: without it they could no longer delete the account.
     return {
-      deleted: true,
-      message:
-        'Local credentials and device data were erased immediately. If your account exists on the remote server, use the Account Deletion portal once online.',
+      deleted: false,
+      message: 'Your account could not be deleted right now, and nothing was removed. Please check your connection and try again.',
     };
   }
 }
