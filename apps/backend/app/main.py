@@ -7,7 +7,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import settings, validate_auth_config
 from app.database import Base, engine, get_db
 from app.models import (
     AccountDeletionRequest,
@@ -24,6 +24,8 @@ from app.schemas import (
     AITutorRequest,
     AITutorResponse,
     AuthLoginRequest,
+    AuthRecoverConfirmRequest,
+    AuthRecoverRequest,
     AuthRegisterRequest,
     AuthResponse,
     GrammarCheckRequest,
@@ -40,18 +42,25 @@ from app.schemas import (
 )
 from app.security import (
     check_rate_limit,
-    create_access_token,
     get_current_user,
     get_optional_user,
     hash_email,
     revoke_token,
     security_scheme,
 )
+from app.services.auth_provider import (
+    AuthProviderError,
+    AuthSessionData,
+    SupabaseAuthProvider,
+    get_auth_provider,
+)
 from app.services.ai_service import (
     generate_grammar_check,
     generate_ielts_evaluation,
     generate_tutor_feedback,
 )
+
+validate_auth_config(settings)
 
 # Initialize database tables for local/test environments
 Base.metadata.create_all(bind=engine)
@@ -98,41 +107,118 @@ def health_check():
 
 
 # ==============================================================================
-# AUTHENTICATION (Delegates password storage to Supabase Auth in production;
-# never stores plaintext or custom password hashes in application tables)
+# AUTHENTICATION (Supabase Auth owns passwords, confirmation emails and resets;
+# this API never stores a password or issues its own tokens)
 # ==============================================================================
+AUTH_ERROR_RESPONSES = {
+    "invalid_credentials": (status.HTTP_401_UNAUTHORIZED, "Incorrect email or password."),
+    "email_not_confirmed": (
+        status.HTTP_403_FORBIDDEN,
+        "Please confirm your email address, then sign in.",
+    ),
+    "already_registered": (
+        status.HTTP_409_CONFLICT,
+        "An account with this email address already exists.",
+    ),
+    "weak_password": (
+        422,
+        "Please choose a stronger password.",
+    ),
+    "invalid_recovery_code": (
+        status.HTTP_400_BAD_REQUEST,
+        "That reset code is incorrect or has expired. Please request a new one.",
+    ),
+    "rate_limited": (
+        status.HTTP_429_TOO_MANY_REQUESTS,
+        "Too many attempts. Please wait a few minutes and try again.",
+    ),
+}
+AUTH_UNAVAILABLE_RESPONSE = (
+    status.HTTP_503_SERVICE_UNAVAILABLE,
+    "Sign-in is not available right now. Please try again later.",
+)
+EMAIL_CONFIRMATION_MESSAGE = (
+    "Check your email to confirm your address, then sign in. "
+    "If you already have an account, sign in or reset your password."
+)
+PASSWORD_RESET_SENT_MESSAGE = "If an account exists for this email, a reset code has been sent."
+
+
+def _auth_http_error(error: AuthProviderError) -> HTTPException:
+    status_code, detail = AUTH_ERROR_RESPONSES.get(error.kind, AUTH_UNAVAILABLE_RESPONSE)
+    return HTTPException(status_code=status_code, detail=detail)
+
+
+def _ensure_profile(db: Session, session: AuthSessionData) -> Profile:
+    """
+    Creates the profile at the first verified sign-in rather than at sign-up: while email
+    confirmation is on, Supabase can return a placeholder user that must not get a profile.
+    """
+    profile = db.query(Profile).filter(Profile.id == session.user_id).first()
+    if profile:
+        return profile
+
+    email = session.email.strip().lower()
+    if db.query(Profile).filter(Profile.email == email).first():
+        # Never hand an existing profile's data to a different login identity.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This email is linked to another account. Please contact support.",
+        )
+
+    profile = Profile(id=session.user_id, email=email, display_name=session.display_name[:120])
+    db.add(profile)
+    try:
+        db.commit()
+    except IntegrityError:
+        # A concurrent first sign-in for this user created the profile first.
+        db.rollback()
+        profile = db.query(Profile).filter(Profile.id == session.user_id).first()
+        if not profile:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This email is linked to another account. Please contact support.",
+            )
+        return profile
+    db.refresh(profile)
+    return profile
+
+
+def _auth_response(profile: Profile, session: AuthSessionData) -> AuthResponse:
+    return AuthResponse(
+        user_id=profile.id,
+        email=profile.email,
+        display_name=profile.display_name,
+        access_token=session.access_token,
+        expires_in=session.expires_in,
+    )
+
+
 @app.post(f"{settings.api_v1_str}/auth/register", response_model=AuthResponse, status_code=201)
 def register_user(
     payload: AuthRegisterRequest,
     request: Request,
     db: Session = Depends(get_db),
+    auth_provider: SupabaseAuthProvider = Depends(get_auth_provider),
 ):
     client_ip = request.client.host if request.client else "unknown"
     check_rate_limit(f"auth:{client_ip}", max_per_minute=20)
 
-    existing = db.query(Profile).filter(Profile.email == payload.email).first()
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email address already exists.",
+    try:
+        session = auth_provider.sign_up(payload.email, payload.password, payload.display_name.strip())
+    except AuthProviderError as error:
+        raise _auth_http_error(error)
+
+    if session is None:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "status": "confirmation_required",
+                "email": payload.email,
+                "message": EMAIL_CONFIRMATION_MESSAGE,
+            },
         )
-
-    profile = Profile(
-        email=payload.email,
-        display_name=payload.display_name.strip(),
-    )
-    db.add(profile)
-    db.commit()
-    db.refresh(profile)
-
-    token = create_access_token(user_id=profile.id, email=profile.email)
-    return AuthResponse(
-        user_id=profile.id,
-        email=profile.email,
-        display_name=profile.display_name,
-        access_token=token,
-        expires_in=3600,
-    )
+    return _auth_response(_ensure_profile(db, session), session)
 
 
 @app.post(f"{settings.api_v1_str}/auth/login", response_model=AuthResponse)
@@ -140,45 +226,69 @@ def login_user(
     payload: AuthLoginRequest,
     request: Request,
     db: Session = Depends(get_db),
+    auth_provider: SupabaseAuthProvider = Depends(get_auth_provider),
 ):
     client_ip = request.client.host if request.client else "unknown"
     check_rate_limit(f"auth:{client_ip}", max_per_minute=20)
 
     cleaned_email = payload.email.strip().lower()
-    profile = db.query(Profile).filter(Profile.email == cleaned_email).first()
-    if not profile:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or credentials.",
-        )
+    check_rate_limit(f"login:{cleaned_email}", max_per_minute=10)
 
-    token = create_access_token(user_id=profile.id, email=profile.email)
-    return AuthResponse(
-        user_id=profile.id,
-        email=profile.email,
-        display_name=profile.display_name,
-        access_token=token,
-        expires_in=3600,
-    )
+    try:
+        session = auth_provider.sign_in(cleaned_email, payload.password)
+    except AuthProviderError as error:
+        raise _auth_http_error(error)
+    return _auth_response(_ensure_profile(db, session), session)
 
 
 @app.post(f"{settings.api_v1_str}/auth/recover")
-def recover_password(payload: Dict[str, str], request: Request):
+def recover_password(
+    payload: AuthRecoverRequest,
+    request: Request,
+    auth_provider: SupabaseAuthProvider = Depends(get_auth_provider),
+):
     client_ip = request.client.host if request.client else "unknown"
-    check_rate_limit(f"auth:{client_ip}", max_per_minute=10)
-    return {
-        "status": "dispatched",
-        "message": "If the email is registered, a password recovery link has been sent via Supabase Auth.",
-    }
+    check_rate_limit(f"reset:{client_ip}", max_per_minute=10)
+
+    try:
+        auth_provider.request_password_reset(payload.email.strip().lower())
+    except AuthProviderError as error:
+        raise _auth_http_error(error)
+    return {"status": "dispatched", "message": PASSWORD_RESET_SENT_MESSAGE}
+
+
+@app.post(f"{settings.api_v1_str}/auth/recover/confirm")
+def confirm_password_recovery(
+    payload: AuthRecoverConfirmRequest,
+    request: Request,
+    auth_provider: SupabaseAuthProvider = Depends(get_auth_provider),
+):
+    client_ip = request.client.host if request.client else "unknown"
+    check_rate_limit(f"reset:{client_ip}", max_per_minute=10)
+
+    cleaned_email = payload.email.strip().lower()
+    check_rate_limit(f"recover:{cleaned_email}", max_per_minute=5)
+
+    try:
+        auth_provider.confirm_password_reset(cleaned_email, payload.code.strip(), payload.new_password)
+    except AuthProviderError as error:
+        raise _auth_http_error(error)
+    return {"status": "password_updated", "message": "Your password has been changed. Please sign in."}
 
 
 @app.post(f"{settings.api_v1_str}/auth/logout")
 def logout_user(
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
     current_user: Profile = Depends(get_current_user),
+    auth_provider: SupabaseAuthProvider = Depends(get_auth_provider),
 ):
     if credentials and credentials.credentials:
         revoke_token(credentials.credentials)
+        try:
+            auth_provider.sign_out(credentials.credentials)
+        except AuthProviderError:
+            # This token is already revoked here and expires soon, so don't fail the sign-out.
+            pass
     return {"status": "logged_out", "user_id": current_user.id}
 
 
@@ -188,6 +298,7 @@ def delete_user_account(
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
+    auth_provider: SupabaseAuthProvider = Depends(get_auth_provider),
 ):
     """
     Permanently deletes the authenticated user's profile and all associated personal data
@@ -196,6 +307,13 @@ def delete_user_account(
     """
     user_id = current_user.id
     email_digest = hash_email(current_user.email)
+
+    # Delete the login first: if this fails nothing is lost and the user can retry, whereas the
+    # reverse order could leave a working login behind after telling the user it was deleted.
+    try:
+        auth_provider.delete_user(user_id)
+    except AuthProviderError as error:
+        raise _auth_http_error(error)
 
     audit_entry = AccountDeletionRequest(
         user_id=user_id,
@@ -286,14 +404,14 @@ def submit_quiz_attempt(
 ):
     if payload.correct_count > payload.total_questions:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail="correct_count cannot exceed total_questions.",
         )
 
     expected_pct = round((payload.correct_count / payload.total_questions) * 100)
     if abs(expected_pct - payload.score_percent) > 1:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=422,
             detail="Inconsistent score_percent relative to correct_count and total_questions.",
         )
 
