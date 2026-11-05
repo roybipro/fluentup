@@ -70,7 +70,6 @@ class QuizSubmissionRequest(BaseModel):
     score_percent: int = Field(..., ge=0, le=100)
     correct_count: int = Field(..., ge=0)
     total_questions: int = Field(..., gt=0)
-    xp_reward: int = Field(default=25, ge=0, le=200)
     passing_score: int = Field(default=70, ge=50, le=100)
     mistakes: List[Dict[str, Any]] = Field(default_factory=list)
 

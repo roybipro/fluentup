@@ -272,3 +272,41 @@ def test_8_account_deletion_cascades_all_personal_records_and_revokes_token():
         assert "delete_me@example.com" not in audit.email_hash
     finally:
         db.close()
+
+
+def _submit_quiz(headers, lesson_id, submission_id, **extra):
+    return client.post(
+        "/api/v1/progress/quiz",
+        headers=headers,
+        json={
+            "lesson_id": lesson_id,
+            "client_submission_id": submission_id,
+            "score_percent": 100,
+            "correct_count": 4,
+            "total_questions": 4,
+            **extra,
+        },
+    )
+
+
+def _register_for_quiz(email):
+    user = client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": "Password123!", "display_name": "Quiz Taker"},
+    ).json()
+    return {"Authorization": f"Bearer {user['access_token']}"}
+
+
+def test_quiz_for_unknown_lesson_is_rejected_and_awards_no_xp():
+    headers = _register_for_quiz("fake_lessons@example.com")
+    res = _submit_quiz(headers, "made-up-lesson", "sub-fake-1")
+    assert res.status_code == 422
+    assert client.get("/api/v1/profile/me", headers=headers).json()["total_xp"] == 0
+
+
+def test_quiz_xp_comes_from_the_server_not_the_client():
+    headers = _register_for_quiz("big_reward@example.com")
+    res = _submit_quiz(headers, "lesson-beg-1", "sub-reward-1", xp_reward=200)
+    assert res.status_code == 200
+    assert res.json()["xp_earned"] == 25
+    assert res.json()["total_xp"] == 25
