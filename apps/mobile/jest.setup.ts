@@ -19,6 +19,18 @@ jest.mock('@react-native-async-storage/async-storage', () => ({
   },
 }));
 
+const mockSecureStorage: Record<string, string> = {};
+
+jest.mock('expo-secure-store', () => ({
+  getItemAsync: jest.fn(async (key: string) => (key in mockSecureStorage ? mockSecureStorage[key] : null)),
+  setItemAsync: jest.fn(async (key: string, value: string) => {
+    mockSecureStorage[key] = value;
+  }),
+  deleteItemAsync: jest.fn(async (key: string) => {
+    delete mockSecureStorage[key];
+  }),
+}));
+
 jest.mock('expo-speech', () => ({
   speak: jest.fn(),
   stop: jest.fn(),

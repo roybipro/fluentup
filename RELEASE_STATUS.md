@@ -1,6 +1,6 @@
 # FluentUp — Production Release Status & Handover Report
 
-**Last Updated:** November 4, 2026  
+**Last Updated:** November 5, 2026  
 **Application Name:** FluentUp  
 **Android Package ID:** `com.fluentup.app`  
 **Version:** `1.0.0` (`versionCode: 1`)  
@@ -16,6 +16,13 @@ Login previously accepted any password, and a public default JWT secret could be
 - **Mobile:** `npm run typecheck` exited 0; `npm test -- --ci` — 18 passed.
 - **Live check:** 26 of 26 account lifecycle checks passed with the backend in production mode against a local Docker `supabase/auth:v2.197.0` using ES256 keys and a local mail catcher (sign-up, email confirmation, wrong and right passwords, forged tokens, password reset by code, logout, account deletion).
 - **Not verified:** a hosted Supabase project, real email delivery, or the updated auth screen on an Android device.
+
+## 0.1 Android Build and Database Verification (November 5, 2026)
+
+- **Android:** EAS `preview` builds compile after aligning `react-native` to 0.76.9, which provides the Kotlin version Expo SDK 52 requires. The APK has not yet been run on a device.
+- **Database:** the backend suite now also runs against Postgres with `supabase/migrations` applied, locally and in CI. That run found that every signed-in request failed on UUID columns and every quiz result failed on an unfilled `lessons` table; both are fixed.
+- **Session tokens:** now stored in SecureStore rather than `AsyncStorage`.
+- **Not verified:** a hosted Supabase project, which also enforces row level security differently from the superuser used in tests.
 
 ## 1. Implemented Features (Not Yet Verified on a Device)
 

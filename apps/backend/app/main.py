@@ -1,4 +1,6 @@
+import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -61,6 +63,12 @@ from app.services.ai_service import (
 )
 
 validate_auth_config(settings)
+
+# Lesson content ships in the mobile app, so this is the server's record of which lessons exist
+# and what they award. A mobile test keeps it in step with the app's curriculum.
+LESSON_XP_REWARDS: Dict[str, int] = json.loads(
+    (Path(__file__).parent / "lesson_catalog.json").read_text(encoding="utf-8")
+)
 
 # Initialize database tables for local/test environments
 Base.metadata.create_all(bind=engine)
@@ -402,6 +410,10 @@ def submit_quiz_attempt(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    xp_reward = LESSON_XP_REWARDS.get(payload.lesson_id)
+    if xp_reward is None:
+        raise HTTPException(status_code=422, detail="Unknown lesson.")
+
     if payload.correct_count > payload.total_questions:
         raise HTTPException(
             status_code=422,
@@ -448,7 +460,7 @@ def submit_quiz_attempt(
 
     passed = payload.score_percent >= payload.passing_score
     already_awarded = bool(progress and progress.xp_awarded)
-    xp_earned = payload.xp_reward if (passed and not already_awarded) else 0
+    xp_earned = xp_reward if (passed and not already_awarded) else 0
 
     now = datetime.now(timezone.utc)
     if not progress:

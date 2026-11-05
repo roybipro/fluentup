@@ -94,12 +94,8 @@ npx expo start
 ## 3. Supabase & Database Migration Setup
 
 1. Create a new project in [Supabase](https://supabase.com/).
-2. Open the **SQL Editor** in the Supabase Dashboard and run [`supabase/migrations/0001_initial_schema.sql`](supabase/migrations/0001_initial_schema.sql) to provision all 12 normalized tables, foreign keys, indexes, and Row Level Security (`auth.uid() = user_id`) policies.
-3. Alternatively, point `DATABASE_URL` in `apps/backend/.env` to your Supabase connection string and run Alembic migrations:
-   ```bash
-   cd apps/backend
-   .venv/bin/alembic upgrade head
-   ```
+2. Open the **SQL Editor** in the Supabase Dashboard and run every file in [`supabase/migrations/`](supabase/migrations/) in filename order.
+3. Point `DATABASE_URL` in `apps/backend/.env` to your Supabase connection string, using the `postgresql+psycopg://` prefix. The SQL files above are the source of truth for the schema, so there are no Alembic migrations to run.
 
 ### Required Supabase Auth settings
 

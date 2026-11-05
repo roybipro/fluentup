@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
 import {
   ExplanationLanguage,
   GrammarCheckResult,
@@ -17,6 +18,28 @@ import {
 } from '../services/learningEngine';
 
 export const STORAGE_KEY = 'fluentup.app.state.v1';
+export const SESSION_STORAGE_KEY = 'fluentup.auth.session.v1';
+
+async function readStoredSession(): Promise<AuthSession | null> {
+  try {
+    const raw = await SecureStore.getItemAsync(SESSION_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as AuthSession) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeStoredSession(session: AuthSession | null): Promise<void> {
+  try {
+    if (session) {
+      await SecureStore.setItemAsync(SESSION_STORAGE_KEY, JSON.stringify(session));
+    } else {
+      await SecureStore.deleteItemAsync(SESSION_STORAGE_KEY);
+    }
+  } catch {
+    // The user stays signed in for this launch and is asked to sign in again on the next one.
+  }
+}
 
 export interface LessonProgressRecord {
   lessonId: string;
@@ -174,7 +197,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (raw) {
         const parsed = JSON.parse(raw);
         // Check session expiration if authenticated
-        let validSession: AuthSession | null = parsed.authSession ?? null;
+        let validSession = await readStoredSession();
         if (validSession && !validSession.isGuest && validSession.expiresAt < Date.now()) {
           validSession = null;
         }
@@ -211,7 +234,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     const state = get();
     const serializable = {
       themeMode: state.themeMode,
-      authSession: state.authSession,
       hasCompletedOnboarding: state.hasCompletedOnboarding,
       preferences: state.preferences,
       totalXp: state.totalXp,
@@ -229,6 +251,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       syncQueue: state.syncQueue,
       lastSyncedAt: state.lastSyncedAt,
     };
+    await writeStoredSession(state.authSession);
     try {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
     } catch {
@@ -322,6 +345,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   deleteAccountAndPurgeData: async () => {
     await AsyncStorage.removeItem(STORAGE_KEY);
+    await writeStoredSession(null);
     set({
       authSession: null,
       hasCompletedOnboarding: false,

@@ -13,9 +13,14 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
 )
 from sqlalchemy.orm import relationship
 from app.database import Base
+
+
+# Matches the UUID columns in supabase/migrations, while still returning IDs as strings.
+UserId = Uuid(as_uuid=False)
 
 
 def utcnow() -> datetime:
@@ -25,7 +30,7 @@ def utcnow() -> datetime:
 class Profile(Base):
     __tablename__ = "profiles"
 
-    id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
+    id = Column(UserId, primary_key=True, default=lambda: str(uuid.uuid4()))
     email = Column(String(255), unique=True, nullable=False, index=True)
     display_name = Column(String(120), nullable=False, default="Learner")
     explanation_language = Column(String(10), nullable=False, default="bn")
@@ -60,8 +65,8 @@ class Profile(Base):
 class LessonProgress(Base):
     __tablename__ = "lesson_progress"
 
-    id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String(64), ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    id = Column(UserId, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(UserId, ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
     lesson_id = Column(String(64), nullable=False, index=True)
     status = Column(String(24), nullable=False, default="not_started")
     best_score = Column(Integer, nullable=False, default=0)
@@ -83,8 +88,8 @@ class LessonProgress(Base):
 class QuizAttempt(Base):
     __tablename__ = "quiz_attempts"
 
-    id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String(64), ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    id = Column(UserId, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(UserId, ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
     lesson_id = Column(String(64), nullable=False, index=True)
     client_submission_id = Column(String(128), unique=True, nullable=False, index=True)
     score_percent = Column(Integer, nullable=False)
@@ -106,8 +111,8 @@ class QuizAttempt(Base):
 class UserVocabulary(Base):
     __tablename__ = "user_vocabulary"
 
-    id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String(64), ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    id = Column(UserId, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(UserId, ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
     word_or_phrase = Column(String(160), nullable=False)
     meaning_bn = Column(String(255), nullable=False, default="")
     definition_en = Column(Text, nullable=False)
@@ -134,8 +139,8 @@ class UserVocabulary(Base):
 class SpeakingSession(Base):
     __tablename__ = "speaking_sessions"
 
-    id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String(64), ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    id = Column(UserId, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(UserId, ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
     scenario_id = Column(String(64), nullable=False)
     mode = Column(String(32), nullable=False, default="ai_tutor")
     user_transcript = Column(Text, nullable=False)
@@ -149,8 +154,8 @@ class SpeakingSession(Base):
 class GrammarCheck(Base):
     __tablename__ = "grammar_checks"
 
-    id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String(64), ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    id = Column(UserId, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(UserId, ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
     original_text = Column(Text, nullable=False)
     corrected_text = Column(Text, nullable=False)
     natural_rewrite = Column(Text, nullable=False)
@@ -164,8 +169,8 @@ class GrammarCheck(Base):
 class IELTSAttempt(Base):
     __tablename__ = "ielts_attempts"
 
-    id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String(64), ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    id = Column(UserId, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(UserId, ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
     module_type = Column(String(24), nullable=False)
     task_id = Column(String(64), nullable=False)
     user_response = Column(Text, nullable=False)
@@ -180,8 +185,8 @@ class IELTSAttempt(Base):
 class AccountDeletionRequest(Base):
     __tablename__ = "account_deletion_requests"
 
-    id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
-    user_id = Column(String(64), nullable=False, index=True)
+    id = Column(UserId, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(UserId, nullable=False, index=True)
     email_hash = Column(String(128), nullable=False)
     status = Column(String(32), nullable=False, default="completed")
     reason = Column(String(255), nullable=True)
