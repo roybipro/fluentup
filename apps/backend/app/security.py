@@ -1,5 +1,6 @@
 import hashlib
 import time
+import uuid
 from collections import defaultdict
 from functools import lru_cache
 from typing import Dict, List, Optional
@@ -127,6 +128,14 @@ def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token missing subject claim",
+        )
+
+    try:
+        uuid.UUID(str(user_id))
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
         )
 
     profile = db.query(Profile).filter(Profile.id == str(user_id)).first()

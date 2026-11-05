@@ -232,7 +232,7 @@ def test_8_account_deletion_cascades_all_personal_records_and_revokes_token():
         headers=headers,
         json={"word_or_phrase": "ephemeral", "definition_en": "Lasting for a very short time."},
     )
-    client.post(
+    quiz = client.post(
         "/api/v1/progress/quiz",
         headers=headers,
         json={
@@ -243,6 +243,7 @@ def test_8_account_deletion_cascades_all_personal_records_and_revokes_token():
             "total_questions": 4,
         },
     )
+    assert quiz.status_code == 200
 
     # Delete account
     del_res = client.request(

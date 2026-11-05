@@ -1,3 +1,4 @@
+import os
 import time
 import uuid
 from typing import Dict, Optional
@@ -5,7 +6,7 @@ from typing import Dict, Optional
 import jwt
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -19,18 +20,25 @@ TEST_SUPABASE_URL = "https://test-project.supabase.co"
 TEST_JWT_SECRET = "unit-test-only-signing-secret-at-least-32-bytes"
 
 # Use in-memory SQLite with StaticPool and foreign_keys=ON for fast, isolated integration tests
-TEST_ENGINE = create_engine(
-    "sqlite:///:memory:",
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
+# Set TEST_DATABASE_URL to run against a database with supabase/migrations applied.
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+TEST_ENGINE = (
+    create_engine(TEST_DATABASE_URL)
+    if TEST_DATABASE_URL
+    else create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
 )
 
 
-@event.listens_for(TEST_ENGINE, "connect")
-def _enable_sqlite_fk(dbapi_connection, connection_record):  # type: ignore
-    cursor = dbapi_connection.cursor()
-    cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.close()
+if not TEST_DATABASE_URL:
+    @event.listens_for(TEST_ENGINE, "connect")
+    def _enable_sqlite_fk(dbapi_connection, connection_record):  # type: ignore
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=TEST_ENGINE)
@@ -141,8 +149,14 @@ def auth_provider() -> FakeSupabaseAuth:
 
 @pytest.fixture(autouse=True)
 def isolated_app_state(monkeypatch, auth_provider):
-    Base.metadata.drop_all(bind=TEST_ENGINE)
-    Base.metadata.create_all(bind=TEST_ENGINE)
+    if TEST_DATABASE_URL:
+        # Keep the migrated schema, since testing it is the point of this mode.
+        with TEST_ENGINE.begin() as connection:
+            for table in reversed(Base.metadata.sorted_tables):
+                connection.execute(text(f"TRUNCATE TABLE {table.name} CASCADE"))
+    else:
+        Base.metadata.drop_all(bind=TEST_ENGINE)
+        Base.metadata.create_all(bind=TEST_ENGINE)
     clear_rate_limits()
     REVOKED_TOKENS.clear()
     monkeypatch.setattr(settings, "supabase_url", TEST_SUPABASE_URL)
