@@ -6,15 +6,17 @@ import {
   GrammarCheckResultSchema,
   IELTSEvaluation,
   IELTSEvaluationSchema,
+  SyncBatchResponseSchema,
 } from '../schemas/domain';
 import {
   analyzeGrammarLocally,
   buildFallbackTutorFeedback,
   evaluateIELTSResponseLocally,
 } from './learningEngine';
-import { SyncQueueMutation, useAppStore } from '../store/useAppStore';
+import { SyncExecutor, useAppStore } from '../store/useAppStore';
 
 const DEFAULT_TIMEOUT_MS = 18000;
+const SYNC_BATCH_SIZE = 25;
 
 export function getApiBaseUrl(): string {
   const extraUrl = Constants.expoConfig?.extra?.apiBaseUrl as string | undefined;
@@ -123,17 +125,34 @@ export async function requestIELTSEvaluation(params: {
   }
 }
 
-export async function syncMutationsToServer(mutations: SyncQueueMutation[]): Promise<boolean> {
+/**
+ * Sends the queue in small batches, so a long offline queue can't exceed the server's request size
+ * limit and get stuck. Resolves with the ids the server confirmed; if a batch can't be delivered,
+ * what earlier batches confirmed still counts and the rest stays queued for the next attempt.
+ */
+export const syncMutationsToServer: SyncExecutor = async (mutations) => {
+  const confirmedIds: string[] = [];
   try {
-    const res = await fetchWithTimeout(`${getApiBaseUrl()}/sync/batch`, {
-      method: 'POST',
-      body: JSON.stringify({ mutations }),
-    });
-    return res.ok;
+    for (let start = 0; start < mutations.length; start += SYNC_BATCH_SIZE) {
+      const res = await fetchWithTimeout(`${getApiBaseUrl()}/sync/batch`, {
+        method: 'POST',
+        body: JSON.stringify({ mutations: mutations.slice(start, start + SYNC_BATCH_SIZE) }),
+      });
+      if (!res.ok) {
+        break;
+      }
+      const { results } = SyncBatchResponseSchema.parse(await res.json());
+      for (const result of results) {
+        if (result.status === 'applied' || result.status === 'duplicate') {
+          confirmedIds.push(result.id);
+        }
+      }
+    }
   } catch {
-    return false;
+    // A network failure or unreadable response confirms nothing further.
   }
-}
+  return confirmedIds;
+};
 
 export async function requestServerAccountDeletion(reason: string): Promise<{ deleted: boolean; message: string }> {
   const session = useAppStore.getState().authSession;

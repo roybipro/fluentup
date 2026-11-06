@@ -10,7 +10,7 @@ import { useRouter } from 'expo-router';
 import { SEED_LEARNING_PATHS } from '../../src/data/curriculum';
 import { findLessonById, getDueVocabularyCards } from '../../src/services/learningEngine';
 import { syncMutationsToServer } from '../../src/services/apiClient';
-import { useAppStore } from '../../src/store/useAppStore';
+import { hasServerAccount, useAppStore } from '../../src/store/useAppStore';
 import { useThemePalette } from '../../src/theme/colors';
 
 export default function HomeScreen() {
@@ -25,6 +25,7 @@ export default function HomeScreen() {
   const activeResumeLessonId = useAppStore((s) => s.activeResumeLessonId);
   const vocabulary = useAppStore((s) => s.vocabulary);
   const mistakesBank = useAppStore((s) => s.mistakesBank);
+  const isSignedIn = useAppStore((s) => hasServerAccount(s.authSession));
   const syncQueue = useAppStore((s) => s.syncQueue);
   const syncStatus = useAppStore((s) => s.syncStatus);
   const isOnline = useAppStore((s) => s.isOnline);
@@ -87,10 +88,12 @@ export default function HomeScreen() {
             ]}
           >
             <Text style={{ color: palette.primary, fontSize: 12, fontWeight: '700' }}>
-              {!isOnline
+              {!isSignedIn
+                ? 'On This Device'
+                : !isOnline
                 ? `Offline (${syncQueue.length})`
                 : syncQueue.length > 0
-                ? `${syncQueue.length} Queued`
+                ? `${syncQueue.length} ${syncStatus === 'error' ? 'Not Synced' : 'Queued'}`
                 : 'Synced ✓'}
             </Text>
           </View>
@@ -232,7 +235,7 @@ export default function HomeScreen() {
       )}
 
       {/* Offline Sync Action if pending */}
-      {syncQueue.length > 0 && (
+      {isSignedIn && syncQueue.length > 0 && (
         <TouchableOpacity
           accessibilityRole="button"
           accessibilityLabel="Synchronize Offline Progress Now"

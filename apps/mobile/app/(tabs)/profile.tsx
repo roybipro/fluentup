@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { requestServerAccountDeletion, syncMutationsToServer } from '../../src/services/apiClient';
-import { useAppStore } from '../../src/store/useAppStore';
+import { hasServerAccount, useAppStore } from '../../src/store/useAppStore';
 import { useThemePalette } from '../../src/theme/colors';
 
 export default function ProfileScreen() {
@@ -204,6 +204,11 @@ export default function ProfileScreen() {
           Queued updates: {syncQueue.length} • Network mode: {isOnline ? 'Online' : 'Offline Mode'}
           {lastSyncedAt ? ` • Last synced: ${lastSyncedAt.slice(0, 19).replace('T', ' ')}` : ''}
         </Text>
+        {!hasServerAccount(authSession) && (
+          <Text style={{ color: palette.textSecondary, fontSize: 13, lineHeight: 19, marginTop: 6 }}>
+            Your progress is saved only on this device. Sign in to sync it to your account.
+          </Text>
+        )}
 
         <View style={styles.row}>
           <TouchableOpacity
@@ -217,16 +222,18 @@ export default function ProfileScreen() {
             </Text>
           </TouchableOpacity>
 
-          <TouchableOpacity
-            accessibilityRole="button"
-            accessibilityLabel="Sync Queued Progress Now"
-            style={[styles.choiceBtn, { borderColor: palette.accent, backgroundColor: palette.background }]}
-            onPress={() => void flushSyncQueue(syncMutationsToServer)}
-          >
-            <Text style={{ color: palette.accent, fontWeight: '700', fontSize: 13 }}>
-              Sync Now ({syncQueue.length})
-            </Text>
-          </TouchableOpacity>
+          {hasServerAccount(authSession) && (
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel="Sync Queued Progress Now"
+              style={[styles.choiceBtn, { borderColor: palette.accent, backgroundColor: palette.background }]}
+              onPress={() => void flushSyncQueue(syncMutationsToServer)}
+            >
+              <Text style={{ color: palette.accent, fontWeight: '700', fontSize: 13 }}>
+                Sync Now ({syncQueue.length})
+              </Text>
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 

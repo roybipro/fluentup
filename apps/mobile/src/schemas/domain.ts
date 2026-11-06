@@ -132,6 +132,17 @@ export const VocabularyCardSchema = z.object({
 });
 export type VocabularyCard = z.infer<typeof VocabularyCardSchema>;
 
+export const SyncBatchResponseSchema = z.object({
+  results: z.array(
+    z.object({
+      id: z.string(),
+      // A status this app version doesn't know about is left unconfirmed, so the mutation is kept.
+      status: z.string(),
+      detail: z.string().nullable().optional(),
+    })
+  ),
+});
+
 export const AITutorFeedbackSchema = z.object({
   tutorReply: z.string(),
   originalLearnerResponse: z.string(),
