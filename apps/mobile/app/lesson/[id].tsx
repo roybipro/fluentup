@@ -92,7 +92,8 @@ export default function LessonDetailScreen() {
       setCurrentExIndex(nextIndex);
       saveLessonBookmark(lesson.id, nextIndex);
     } else {
-      const clientSubmissionId = `sub-${lesson.id}-${Date.now()}`;
+      // The server requires this to be unique across all users, not only this device.
+      const clientSubmissionId = `sub-${lesson.id}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       const result = submitLessonQuiz({
         lessonId: lesson.id,
         answers,

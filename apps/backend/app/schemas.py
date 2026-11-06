@@ -1,5 +1,16 @@
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
+
+# Largest value the INTEGER columns in supabase/migrations can hold.
+MAX_POSTGRES_INT = 2_147_483_647
+
+
+def _reject_nul_characters(value: str) -> str:
+    # Postgres text columns can't hold these, though SQLite accepts them.
+    if "\x00" in value:
+        raise ValueError("Text cannot contain NUL characters")
+    return value
 
 
 class AuthRegisterRequest(BaseModel):
@@ -68,9 +79,8 @@ class QuizSubmissionRequest(BaseModel):
     lesson_id: str = Field(..., min_length=1, max_length=64)
     client_submission_id: str = Field(..., min_length=4, max_length=128)
     score_percent: int = Field(..., ge=0, le=100)
-    correct_count: int = Field(..., ge=0)
-    total_questions: int = Field(..., gt=0)
-    xp_reward: int = Field(default=25, ge=0, le=200)
+    correct_count: int = Field(..., ge=0, le=MAX_POSTGRES_INT)
+    total_questions: int = Field(..., gt=0, le=MAX_POSTGRES_INT)
     passing_score: int = Field(default=70, ge=50, le=100)
     mistakes: List[Dict[str, Any]] = Field(default_factory=list)
 
@@ -78,6 +88,11 @@ class QuizSubmissionRequest(BaseModel):
     @classmethod
     def check_correct_le_total(cls, v: int, info) -> int:  # type: ignore
         return v
+
+    @field_validator("lesson_id", "client_submission_id")
+    @classmethod
+    def check_no_nul_characters(cls, v: str) -> str:
+        return _reject_nul_characters(v)
 
 
 class QuizSubmissionResponse(BaseModel):
@@ -98,6 +113,11 @@ class VocabularyUpsertRequest(BaseModel):
     phonetic: str = Field(default="/—/", max_length=100)
     is_favorite: bool = False
     rating: Optional[int] = Field(default=None, ge=0, le=5)
+
+    @field_validator("word_or_phrase", "meaning_bn", "definition_en", "example_sentence", "phonetic")
+    @classmethod
+    def check_no_nul_characters(cls, v: str) -> str:
+        return _reject_nul_characters(v)
 
 
 class VocabularyItemResponse(BaseModel):
@@ -211,7 +231,39 @@ class SyncMutationItem(BaseModel):
 
 
 class SyncBatchRequest(BaseModel):
-    mutations: List[SyncMutationItem]
+    mutations: List[SyncMutationItem] = Field(..., max_length=100)
+
+
+class VocabularySnapshot(BaseModel):
+    """A card as the app stores it, including the review schedule it calculated offline."""
+
+    wordOrPhrase: str
+    meaningBn: str = ""
+    definitionEn: str
+    exampleSentence: str = ""
+    phonetic: str = "/—/"
+    isFavorite: bool = False
+    repetitionNumber: int = Field(default=0, ge=0, le=MAX_POSTGRES_INT)
+    easinessFactor: float = Field(default=2.5, ge=1.3, allow_inf_nan=False)
+    intervalDays: int = Field(default=0, ge=0, le=MAX_POSTGRES_INT)
+    nextReviewAt: datetime
+    lastReviewedAt: Optional[datetime] = None
+    reviewHistory: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class SyncMutationResult(BaseModel):
+    id: str
+    type: str
+    status: Literal["applied", "duplicate", "rejected", "failed"]
+    detail: Optional[str] = None
+
+
+class SyncBatchResponse(BaseModel):
+    synced: bool
+    processed_count: int
+    failed_count: int
+    user_id: str
+    results: List[SyncMutationResult]
 
 
 class AccountDeletionRequestModel(BaseModel):

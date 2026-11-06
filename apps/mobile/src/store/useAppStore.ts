@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
 import {
   ExplanationLanguage,
   GrammarCheckResult,
@@ -17,6 +18,28 @@ import {
 } from '../services/learningEngine';
 
 export const STORAGE_KEY = 'fluentup.app.state.v1';
+export const SESSION_STORAGE_KEY = 'fluentup.auth.session.v1';
+
+async function readStoredSession(): Promise<AuthSession | null> {
+  try {
+    const raw = await SecureStore.getItemAsync(SESSION_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as AuthSession) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeStoredSession(session: AuthSession | null): Promise<void> {
+  try {
+    if (session) {
+      await SecureStore.setItemAsync(SESSION_STORAGE_KEY, JSON.stringify(session));
+    } else {
+      await SecureStore.deleteItemAsync(SESSION_STORAGE_KEY);
+    }
+  } catch {
+    // The user stays signed in for this launch and is asked to sign in again on the next one.
+  }
+}
 
 export interface LessonProgressRecord {
   lessonId: string;
@@ -44,11 +67,14 @@ export interface MistakeItem {
 
 export interface SyncQueueMutation {
   id: string;
-  type: 'lesson_quiz_completed' | 'vocabulary_upserted' | 'profile_updated' | 'grammar_checked' | 'ielts_completed';
+  type: 'lesson_quiz_completed' | 'vocabulary_upserted';
   payload: Record<string, unknown>;
   createdAt: string;
   retryCount: number;
 }
+
+/** Sends mutations to the server and resolves with the ids of those it confirmed saving. */
+export type SyncExecutor = (mutations: SyncQueueMutation[]) => Promise<string[]>;
 
 export interface AuthSession {
   userId: string;
@@ -59,12 +85,17 @@ export interface AuthSession {
   isGuest: boolean;
 }
 
+/** Guests and signed-out users have no server account, so their progress stays on this device. */
+export function hasServerAccount(session: AuthSession | null): session is AuthSession {
+  return Boolean(session && !session.isGuest);
+}
+
 export interface AppState {
   // Hydration & UI
   isHydrated: boolean;
   themeMode: 'light' | 'dark';
   isOnline: boolean;
-  syncStatus: 'idle' | 'syncing' | 'synced' | 'offline_queued' | 'error';
+  syncStatus: 'idle' | 'syncing' | 'synced' | 'offline_queued' | 'error' | 'local_only';
   lastSyncedAt: string | null;
 
   // Auth & Onboarding
@@ -126,7 +157,7 @@ export interface AppState {
   recordIELTSAttempt: (evalResult: IELTSEvaluation, userResponse: string) => void;
 
   // Sync Actions
-  flushSyncQueue: (syncExecutor?: (mutations: SyncQueueMutation[]) => Promise<boolean>) => Promise<boolean>;
+  flushSyncQueue: (syncExecutor: SyncExecutor) => Promise<boolean>;
 }
 
 const DEFAULT_PREFERENCES: OnboardingPreferences = {
@@ -174,7 +205,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (raw) {
         const parsed = JSON.parse(raw);
         // Check session expiration if authenticated
-        let validSession: AuthSession | null = parsed.authSession ?? null;
+        let validSession = await readStoredSession();
         if (validSession && !validSession.isGuest && validSession.expiresAt < Date.now()) {
           validSession = null;
         }
@@ -211,7 +242,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     const state = get();
     const serializable = {
       themeMode: state.themeMode,
-      authSession: state.authSession,
       hasCompletedOnboarding: state.hasCompletedOnboarding,
       preferences: state.preferences,
       totalXp: state.totalXp,
@@ -229,6 +259,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       syncQueue: state.syncQueue,
       lastSyncedAt: state.lastSyncedAt,
     };
+    await writeStoredSession(state.authSession);
     try {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
     } catch {
@@ -322,6 +353,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   deleteAccountAndPurgeData: async () => {
     await AsyncStorage.removeItem(STORAGE_KEY);
+    await writeStoredSession(null);
     set({
       authSession: null,
       hasCompletedOnboarding: false,
@@ -434,6 +466,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           scorePercent: quizResult.scorePercent,
           correctCount: quizResult.correctCount,
           totalQuestions: quizResult.totalQuestions,
+          passingScore: lesson.passingScore,
           xpEarned: quizResult.xpEarned,
           completedAt: nowIso,
         },
@@ -594,8 +627,17 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   flushSyncQueue: async (syncExecutor) => {
     const state = get();
+    const session = state.authSession;
+    if (!hasServerAccount(session)) {
+      // Nothing is sent, so this must never read as synced. The queue is kept for a later sign-in.
+      set({ syncStatus: 'local_only' });
+      return false;
+    }
     if (!state.isOnline) {
       set({ syncStatus: 'offline_queued' });
+      return false;
+    }
+    if (state.syncStatus === 'syncing') {
       return false;
     }
     if (state.syncQueue.length === 0) {
@@ -603,31 +645,37 @@ export const useAppStore = create<AppState>((set, get) => ({
       return true;
     }
 
+    const sent = state.syncQueue;
     set({ syncStatus: 'syncing' });
+
+    let confirmedIds: string[] = [];
     try {
-      const ok = syncExecutor ? await syncExecutor(state.syncQueue) : true;
-      if (ok) {
-        const nowIso = new Date().toISOString();
-        set({
-          syncQueue: [],
-          syncStatus: 'synced',
-          lastSyncedAt: nowIso,
-        });
-        await get().persistToStorage();
-        return true;
-      }
-      set({ syncStatus: 'error' });
-      return false;
+      confirmedIds = await syncExecutor(sent);
     } catch {
-      set((prev) => ({
-        syncStatus: 'error',
-        syncQueue: prev.syncQueue.map((item) => ({
-          ...item,
-          retryCount: item.retryCount + 1,
-        })),
-      }));
-      await get().persistToStorage();
+      // Nothing was confirmed, so everything stays queued.
+    }
+
+    // Signing out while the request was running already cleared the queue and the status.
+    if (get().authSession?.userId !== session.userId) {
       return false;
     }
+
+    const confirmed = new Set(confirmedIds);
+    const sentIds = new Set(sent.map((item) => item.id));
+    const allConfirmed = sent.every((item) => confirmed.has(item.id));
+
+    // Works from the current queue, because the user may have added to it during the request.
+    set((prev) => {
+      const remaining = prev.syncQueue
+        .filter((item) => !confirmed.has(item.id))
+        .map((item) => (sentIds.has(item.id) ? { ...item, retryCount: item.retryCount + 1 } : item));
+      return {
+        syncQueue: remaining,
+        syncStatus: !allConfirmed ? 'error' : remaining.length > 0 ? 'idle' : 'synced',
+        lastSyncedAt: allConfirmed ? new Date().toISOString() : prev.lastSyncedAt,
+      };
+    });
+    await get().persistToStorage();
+    return allConfirmed;
   },
 }));

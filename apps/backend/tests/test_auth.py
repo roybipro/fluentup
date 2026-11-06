@@ -131,6 +131,11 @@ def test_tokens_with_invalid_claims_are_rejected(existing_user, overrides):
     assert client.get("/api/v1/profile/me", headers=bearer(token)).status_code == 401
 
 
+def test_validly_signed_token_with_non_uuid_subject_is_rejected():
+    token = make_token("not-a-uuid")
+    assert client.get("/api/v1/profile/me", headers=bearer(token)).status_code == 401
+
+
 def test_unsigned_token_is_rejected(existing_user):
     token = jwt.encode(
         {

@@ -13,6 +13,18 @@ jobs:
   backend-checks:
     name: Backend FastAPI Pytest & Schema Validation
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     defaults:
       run:
         working-directory: apps/backend
@@ -38,6 +50,22 @@ jobs:
           PYTHONPATH: .
         run: pytest tests -v
 
+      - name: Apply Supabase Migrations to Postgres
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -v ON_ERROR_STOP=1 -f tests/postgres_auth_stub.sql
+          for migration in ../../supabase/migrations/*.sql; do
+            psql -h localhost -U postgres -v ON_ERROR_STOP=1 -f "$migration"
+          done
+
+      - name: Run Backend Tests Against the Real Postgres Schema
+        env:
+          ENVIRONMENT: test
+          PYTHONPATH: .
+          TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/postgres
+        run: pytest tests -v
+
   mobile-checks:
     name: Mobile Expo TypeScript, Tests & Config Validation
     runs-on: ubuntu-latest
@@ -60,6 +88,9 @@ jobs:
 
       - name: TypeScript Strict Typecheck
         run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
 
       - name: Run Mobile Jest Test Suite
         run: npm test -- --ci

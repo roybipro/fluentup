@@ -14,7 +14,7 @@ import {
   getDueVocabularyCards,
   isLessonUnlocked,
 } from '../services/learningEngine';
-import { useAppStore } from '../store/useAppStore';
+import { SyncQueueMutation, useAppStore } from '../store/useAppStore';
 
 describe('FluentUp Mobile Learning Engine & Store Suite', () => {
   beforeEach(async () => {
@@ -121,6 +121,15 @@ describe('FluentUp Mobile Learning Engine & Store Suite', () => {
   });
 
   test('7. Offline synchronization queue records mutations and flushes when online', async () => {
+    useAppStore.getState().signInUser({
+      userId: 'user-123',
+      email: 'learner@example.com',
+      displayName: 'Rafiq',
+      accessToken: 'jwt-token',
+      expiresAt: Date.now() + 60_000,
+      isGuest: false,
+    });
+    const confirmAll = async (mutations: SyncQueueMutation[]) => mutations.map((m) => m.id);
     useAppStore.getState().setOnlineStatus(false);
     const lesson = SEED_LEARNING_PATHS[0].lessons[0];
     const answers: Record<string, string> = {};
@@ -138,12 +147,12 @@ describe('FluentUp Mobile Learning Engine & Store Suite', () => {
     expect(useAppStore.getState().syncStatus).toBe('offline_queued');
 
     // Cannot flush while offline
-    const offlineFlush = await useAppStore.getState().flushSyncQueue(async () => true);
+    const offlineFlush = await useAppStore.getState().flushSyncQueue(confirmAll);
     expect(offlineFlush).toBe(false);
 
     // Reconnect and flush
     useAppStore.getState().setOnlineStatus(true);
-    const onlineFlush = await useAppStore.getState().flushSyncQueue(async () => true);
+    const onlineFlush = await useAppStore.getState().flushSyncQueue(confirmAll);
     expect(onlineFlush).toBe(true);
     expect(useAppStore.getState().syncQueue.length).toBe(0);
     expect(useAppStore.getState().syncStatus).toBe('synced');
