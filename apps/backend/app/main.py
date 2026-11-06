@@ -1,7 +1,4 @@
-import json
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Dict
+from datetime import datetime, timezone
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -15,9 +12,7 @@ from app.models import (
     AccountDeletionRequest,
     GrammarCheck,
     IELTSAttempt,
-    LessonProgress,
     Profile,
-    QuizAttempt,
     SpeakingSession,
     UserVocabulary,
 )
@@ -39,6 +34,7 @@ from app.schemas import (
     QuizSubmissionRequest,
     QuizSubmissionResponse,
     SyncBatchRequest,
+    SyncBatchResponse,
     VocabularyItemResponse,
     VocabularyUpsertRequest,
 )
@@ -61,14 +57,14 @@ from app.services.ai_service import (
     generate_ielts_evaluation,
     generate_tutor_feedback,
 )
+from app.services.progress_service import (
+    apply_sync_mutation,
+    record_quiz_attempt,
+    upsert_vocabulary_item,
+    vocabulary_item_response,
+)
 
 validate_auth_config(settings)
-
-# Lesson content ships in the mobile app, so this is the server's record of which lessons exist
-# and what they award. A mobile test keeps it in step with the app's curriculum.
-LESSON_XP_REWARDS: Dict[str, int] = json.loads(
-    (Path(__file__).parent / "lesson_catalog.json").read_text(encoding="utf-8")
-)
 
 # Initialize database tables for local/test environments
 Base.metadata.create_all(bind=engine)
@@ -410,111 +406,7 @@ def submit_quiz_attempt(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    xp_reward = LESSON_XP_REWARDS.get(payload.lesson_id)
-    if xp_reward is None:
-        raise HTTPException(status_code=422, detail="Unknown lesson.")
-
-    if payload.correct_count > payload.total_questions:
-        raise HTTPException(
-            status_code=422,
-            detail="correct_count cannot exceed total_questions.",
-        )
-
-    expected_pct = round((payload.correct_count / payload.total_questions) * 100)
-    if abs(expected_pct - payload.score_percent) > 1:
-        raise HTTPException(
-            status_code=422,
-            detail="Inconsistent score_percent relative to correct_count and total_questions.",
-        )
-
-    # Check idempotency key first
-    existing_attempt = (
-        db.query(QuizAttempt)
-        .filter(QuizAttempt.client_submission_id == payload.client_submission_id)
-        .first()
-    )
-    if existing_attempt:
-        if existing_attempt.user_id != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Submission ID belongs to another user.",
-            )
-        return QuizSubmissionResponse(
-            lesson_id=existing_attempt.lesson_id,
-            client_submission_id=existing_attempt.client_submission_id,
-            score_percent=existing_attempt.score_percent,
-            passed=existing_attempt.score_percent >= payload.passing_score,
-            xp_earned=0,
-            total_xp=current_user.total_xp,
-            duplicate_submission=True,
-        )
-
-    progress = (
-        db.query(LessonProgress)
-        .filter(
-            LessonProgress.user_id == current_user.id,
-            LessonProgress.lesson_id == payload.lesson_id,
-        )
-        .first()
-    )
-
-    passed = payload.score_percent >= payload.passing_score
-    already_awarded = bool(progress and progress.xp_awarded)
-    xp_earned = xp_reward if (passed and not already_awarded) else 0
-
-    now = datetime.now(timezone.utc)
-    if not progress:
-        progress = LessonProgress(
-            user_id=current_user.id,
-            lesson_id=payload.lesson_id,
-            status="completed" if passed else "in_progress",
-            best_score=payload.score_percent,
-            attempts_count=1,
-            xp_awarded=bool(xp_earned > 0),
-            completed_at=now if passed else None,
-        )
-        db.add(progress)
-    else:
-        progress.attempts_count += 1
-        progress.best_score = max(progress.best_score, payload.score_percent)
-        if passed:
-            progress.status = "completed"
-            progress.completed_at = progress.completed_at or now
-        if xp_earned > 0:
-            progress.xp_awarded = True
-
-    attempt = QuizAttempt(
-        user_id=current_user.id,
-        lesson_id=payload.lesson_id,
-        client_submission_id=payload.client_submission_id,
-        score_percent=payload.score_percent,
-        correct_count=payload.correct_count,
-        total_questions=payload.total_questions,
-        xp_earned=xp_earned,
-        mistakes=payload.mistakes,
-    )
-    db.add(attempt)
-
-    current_user.total_xp += xp_earned
-    try:
-        db.commit()
-    except IntegrityError:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Concurrent duplicate quiz submission detected.",
-        )
-
-    db.refresh(current_user)
-    return QuizSubmissionResponse(
-        lesson_id=payload.lesson_id,
-        client_submission_id=payload.client_submission_id,
-        score_percent=payload.score_percent,
-        passed=passed,
-        xp_earned=xp_earned,
-        total_xp=current_user.total_xp,
-        duplicate_submission=False,
-    )
+    return record_quiz_attempt(db, current_user, payload)
 
 
 # ==============================================================================
@@ -531,22 +423,7 @@ def list_my_vocabulary(
         .order_by(UserVocabulary.next_review_at.asc())
         .all()
     )
-    return [
-        VocabularyItemResponse(
-            id=i.id,
-            word_or_phrase=i.word_or_phrase,
-            meaning_bn=i.meaning_bn,
-            definition_en=i.definition_en,
-            example_sentence=i.example_sentence,
-            phonetic=i.phonetic,
-            is_favorite=i.is_favorite,
-            repetition_number=i.repetition_number,
-            easiness_factor=i.easiness_factor,
-            interval_days=i.interval_days,
-            next_review_at=i.next_review_at.isoformat(),
-        )
-        for i in items
-    ]
+    return [vocabulary_item_response(item) for item in items]
 
 
 @app.post(f"{settings.api_v1_str}/vocabulary", response_model=VocabularyItemResponse)
@@ -555,88 +432,32 @@ def upsert_vocabulary(
     current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    word_clean = payload.word_or_phrase.strip()
-    existing = (
-        db.query(UserVocabulary)
-        .filter(
-            UserVocabulary.user_id == current_user.id,
-            UserVocabulary.word_or_phrase == word_clean,
-        )
-        .first()
-    )
-    now = datetime.now(timezone.utc)
-
-    if not existing:
-        existing = UserVocabulary(
-            user_id=current_user.id,
-            word_or_phrase=word_clean,
-            meaning_bn=payload.meaning_bn,
-            definition_en=payload.definition_en,
-            example_sentence=payload.example_sentence,
-            phonetic=payload.phonetic,
-            is_favorite=payload.is_favorite,
-            repetition_number=0,
-            easiness_factor=2.5,
-            interval_days=0,
-            next_review_at=now,
-            review_history=[],
-        )
-        db.add(existing)
-    else:
-        existing.meaning_bn = payload.meaning_bn or existing.meaning_bn
-        existing.definition_en = payload.definition_en or existing.definition_en
-        existing.is_favorite = payload.is_favorite
-
-    if payload.rating is not None:
-        r = payload.rating
-        if r >= 3:
-            if existing.repetition_number == 0:
-                existing.interval_days = 1
-            elif existing.repetition_number == 1:
-                existing.interval_days = 3
-            else:
-                existing.interval_days = max(1, round(existing.interval_days * existing.easiness_factor))
-            existing.repetition_number += 1
-        else:
-            existing.repetition_number = 0
-            existing.interval_days = 1
-
-        q_delta = 5 - r
-        ef = existing.easiness_factor + (0.1 - q_delta * (0.08 + q_delta * 0.02))
-        existing.easiness_factor = round(max(1.3, ef), 2)
-        existing.last_reviewed_at = now
-        existing.next_review_at = now + timedelta(days=existing.interval_days)
-
-    db.commit()
-    db.refresh(existing)
-    return VocabularyItemResponse(
-        id=existing.id,
-        word_or_phrase=existing.word_or_phrase,
-        meaning_bn=existing.meaning_bn,
-        definition_en=existing.definition_en,
-        example_sentence=existing.example_sentence,
-        phonetic=existing.phonetic,
-        is_favorite=existing.is_favorite,
-        repetition_number=existing.repetition_number,
-        easiness_factor=existing.easiness_factor,
-        interval_days=existing.interval_days,
-        next_review_at=existing.next_review_at.isoformat(),
-    )
+    return vocabulary_item_response(upsert_vocabulary_item(db, current_user, payload))
 
 
 # ==============================================================================
 # OFFLINE SYNC BATCH ENDPOINT
 # ==============================================================================
-@app.post(f"{settings.api_v1_str}/sync/batch")
+@app.post(f"{settings.api_v1_str}/sync/batch", response_model=SyncBatchResponse)
 def sync_offline_mutations(
     payload: SyncBatchRequest,
-    current_user: Profile | None = Depends(get_optional_user),
+    current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    return {
-        "synced": True,
-        "processed_count": len(payload.mutations),
-        "user_id": current_user.id if current_user else "guest",
-    }
+    """
+    Applies each mutation on its own and reports the outcome per mutation id. The response is
+    200 even when some fail, so "synced" and "results" must be read rather than the status code.
+    """
+    user_id = current_user.id
+    results = [apply_sync_mutation(db, current_user, mutation) for mutation in payload.mutations]
+    confirmed = sum(1 for result in results if result.status in ("applied", "duplicate"))
+    return SyncBatchResponse(
+        synced=confirmed == len(results),
+        processed_count=confirmed,
+        failed_count=len(results) - confirmed,
+        user_id=user_id,
+        results=results,
+    )
 
 
 # ==============================================================================
