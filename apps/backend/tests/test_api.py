@@ -316,3 +316,32 @@ def test_8_account_deletion_cascades_all_personal_records_and_revokes_token():
         assert "delete_me@example.com" not in audit.email_hash
     finally:
         db.close()
+
+
+def test_login_rejects_wrong_password_and_unknown_email_identically():
+    client.post(
+        "/api/v1/auth/register",
+        json={"email": "pw@example.com", "password": "CorrectHorse123!", "display_name": "PW"},
+    )
+    wrong = client.post("/api/v1/auth/login", json={"email": "pw@example.com", "password": "WrongPassword99"})
+    unknown = client.post("/api/v1/auth/login", json={"email": "ghost@example.com", "password": "WrongPassword99"})
+    assert wrong.status_code == 401
+    assert unknown.status_code == 401
+    assert wrong.json() == unknown.json()
+
+    ok = client.post("/api/v1/auth/login", json={"email": "pw@example.com", "password": "CorrectHorse123!"})
+    assert ok.status_code == 200
+    assert ok.json()["access_token"]
+
+
+def test_password_is_stored_hashed():
+    client.post(
+        "/api/v1/auth/register",
+        json={"email": "hash@example.com", "password": "CorrectHorse123!", "display_name": "H"},
+    )
+    db = TestingSessionLocal()
+    try:
+        profile = db.query(Profile).filter(Profile.email == "hash@example.com").one()
+        assert profile.password_hash and "CorrectHorse123!" not in profile.password_hash
+    finally:
+        db.close()

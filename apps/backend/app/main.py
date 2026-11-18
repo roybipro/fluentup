@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Dict
+
+import bcrypt
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -98,8 +100,7 @@ def health_check():
 
 
 # ==============================================================================
-# AUTHENTICATION (Delegates password storage to Supabase Auth in production;
-# never stores plaintext or custom password hashes in application tables)
+# AUTHENTICATION (bcrypt password hashes; never store plaintext)
 # ==============================================================================
 @app.post(f"{settings.api_v1_str}/auth/register", response_model=AuthResponse, status_code=201)
 def register_user(
@@ -119,6 +120,7 @@ def register_user(
 
     profile = Profile(
         email=payload.email,
+        password_hash=bcrypt.hashpw(payload.password.encode(), bcrypt.gensalt()).decode(),
         display_name=payload.display_name.strip(),
     )
     db.add(profile)
@@ -135,6 +137,9 @@ def register_user(
     )
 
 
+_DUMMY_PASSWORD_HASH = bcrypt.hashpw(b"dummy-password-for-timing", bcrypt.gensalt()).decode()
+
+
 @app.post(f"{settings.api_v1_str}/auth/login", response_model=AuthResponse)
 def login_user(
     payload: AuthLoginRequest,
@@ -146,7 +151,10 @@ def login_user(
 
     cleaned_email = payload.email.strip().lower()
     profile = db.query(Profile).filter(Profile.email == cleaned_email).first()
-    if not profile:
+    # Check against a dummy hash for unknown emails so timing doesn't reveal which accounts exist.
+    stored_hash = profile.password_hash if profile and profile.password_hash else _DUMMY_PASSWORD_HASH
+    password_ok = bcrypt.checkpw(payload.password.encode(), stored_hash.encode())
+    if not profile or not profile.password_hash or not password_ok:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or credentials.",
