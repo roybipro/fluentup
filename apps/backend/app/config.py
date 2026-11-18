@@ -1,6 +1,7 @@
 import os
+import secrets
 from typing import List
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class Settings(BaseModel):
@@ -15,10 +16,7 @@ class Settings(BaseModel):
     supabase_url: str = os.getenv("SUPABASE_URL", "")
     supabase_anon_key: str = os.getenv("SUPABASE_ANON_KEY", "")
     supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-    supabase_jwt_secret: str = os.getenv(
-        "SUPABASE_JWT_SECRET",
-        "fluentup-dev-jwt-secret-change-in-production-32bytes",
-    )
+    supabase_jwt_secret: str = os.getenv("SUPABASE_JWT_SECRET", "")
 
     # Server-Side LLM Provider Credentials (NEVER exposed to mobile client)
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
@@ -30,6 +28,17 @@ class Settings(BaseModel):
     # Security & Operational Safeguards
     rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
     max_request_body_bytes: int = int(os.getenv("MAX_REQUEST_BODY_BYTES", "262144"))
+
+    @model_validator(mode="after")
+    def _require_jwt_secret(self) -> "Settings":
+        if len(self.supabase_jwt_secret) >= 32:
+            return self
+        if self.environment not in ("development", "test"):
+            raise ValueError("SUPABASE_JWT_SECRET must be set to at least 32 characters outside development/test.")
+        if not self.supabase_jwt_secret:
+            # Random per-process dev secret: tokens stop working on restart, which is fine locally.
+            self.supabase_jwt_secret = secrets.token_urlsafe(32)
+        return self
 
     @property
     def cors_origins(self) -> List[str]:

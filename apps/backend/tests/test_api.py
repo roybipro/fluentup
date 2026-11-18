@@ -345,3 +345,20 @@ def test_password_is_stored_hashed():
         assert profile.password_hash and "CorrectHorse123!" not in profile.password_hash
     finally:
         db.close()
+
+
+@pytest.mark.parametrize("secret", ["", "too-short"])
+def test_production_settings_require_strong_jwt_secret(secret):
+    from app.config import Settings
+
+    with pytest.raises(ValueError, match="SUPABASE_JWT_SECRET"):
+        Settings(environment="production", supabase_jwt_secret=secret)
+
+
+def test_dev_settings_have_no_hardcoded_jwt_secret():
+    from app.config import Settings
+
+    a = Settings(environment="development", supabase_jwt_secret="")
+    b = Settings(environment="development", supabase_jwt_secret="")
+    assert len(a.supabase_jwt_secret) >= 32
+    assert a.supabase_jwt_secret != b.supabase_jwt_secret
