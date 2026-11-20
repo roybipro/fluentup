@@ -549,3 +549,8 @@ def test_oversized_chunked_body_is_rejected():
 
     res = client.post("/api/v1/auth/login", content=chunks(), headers={"Content-Type": "application/json"})
     assert res.status_code == 413
+
+
+def test_password_recovery_is_not_faked():
+    res = client.post("/api/v1/auth/recover", json={"email": "someone@example.com"})
+    assert res.status_code == 501

@@ -50,18 +50,28 @@ export default function AuthScreen() {
     try {
       const trimmedEmail = email.trim().toLowerCase();
       if (mode === 'recovery') {
+        let recoverOk = false;
         try {
-          await fetch(`${getApiBaseUrl()}/auth/recover`, {
+          const recoverRes = await fetch(`${getApiBaseUrl()}/auth/recover`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email: trimmedEmail }),
           });
-        } catch {
-          // Even if offline, provide clear instruction
+          recoverOk = recoverRes.ok;
+        } catch (error) {
+          if (__DEV__) console.warn('[auth] recover request failed', error);
         }
-        setInfoMessage(
-          `If an account exists for ${trimmedEmail}, a password reset link has been dispatched via Supabase Auth.`
-        );
+        if (recoverOk) {
+          setInfoMessage(
+            `If an account exists for ${trimmedEmail}, a password reset link has been sent.\n` +
+              `${trimmedEmail} দিয়ে অ্যাকাউন্ট থাকলে পাসওয়ার্ড রিসেট লিংক পাঠানো হয়েছে।`
+          );
+        } else {
+          setErrorMessage(
+            'Password reset is not available yet. Please contact support.\n' +
+              'পাসওয়ার্ড রিসেট এখনও চালু হয়নি। অনুগ্রহ করে সাপোর্টে যোগাযোগ করুন।'
+          );
+        }
         return;
       }
 

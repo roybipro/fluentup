@@ -172,10 +172,11 @@ def login_user(
 @app.post(f"{settings.api_v1_str}/auth/recover")
 def recover_password(payload: Dict[str, str], request: Request, db: Session = Depends(get_db)):
     check_rate_limit(db, f"auth:{client_ip(request)}", max_per_minute=10)
-    return {
-        "status": "dispatched",
-        "message": "If the email is registered, a password recovery link has been sent via Supabase Auth.",
-    }
+    # No email provider is wired up yet. Say so instead of pretending a reset link was sent.
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Password reset is not available yet. Please contact support.",
+    )
 
 
 @app.post(f"{settings.api_v1_str}/auth/logout")
