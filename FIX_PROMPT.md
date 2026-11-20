@@ -1,5 +1,23 @@
 # Fix prompt — FluentUp security & correctness pass
 
+> **Status (2026-11-20): all 20 items fixed on `fix/security-pass`.** Each has a regression test.
+> Backend 41 pytest, mobile 30 Jest, typecheck clean. Migrations and a smoke test were also
+> verified on Postgres 15. The list below is kept for history.
+>
+> | # | Commit | # | Commit | # | Commit | # | Commit |
+> |---|---|---|---|---|---|---|---|
+> | 0 | `415550a` | 5 | `1beee52` | 10 | `d982e6d` | 15 | `5d7303f` |
+> | 1 | `ab54726` | 6 | `4abc030` | 11 | `afcab3f` | 16 | `a4496ac` |
+> | 2 | `bfee6db` | 7 | `148be51` | 12 | `a9656d6` | 17 | `59557ec` |
+> | 3 | `1f715dd` | 8 | `1186e8b` | 13 | `8a7cd23` | 18 | `00c39ad` |
+> | 4 | `53fcb34` | 9 | `94b90bc` | 14 | `0eb38d1` | 19 | `d513e8d` |
+>
+> Notes:
+> - #1: kept local auth with bcrypt (not the Supabase Auth alternative).
+> - #5: AI endpoints require sign-in (not a per-IP anonymous quota); guests use the on-device engine.
+> - #16: `/auth/recover` returns 501. Accounts created before bcrypt can't log in until password reset exists.
+> - #17 also added the missing Postgres driver (`psycopg[binary]`).
+
 Paste everything below the line into an AI coding agent (Claude Code, Copilot, etc.) at the repo root.
 
 ---

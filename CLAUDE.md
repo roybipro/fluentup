@@ -83,6 +83,9 @@ apps/backend/
 - Tokens belong in `expo-secure-store`, not AsyncStorage.
 - Don't clear the offline sync queue until the server acknowledges each item.
 
-## Known broken (as of 2026-11-18)
+## Known issues (as of 2026-11-20)
 
-Login does not check passwords, the JWT secret has a hardcoded fallback, `/sync/batch` drops data, and more. The full ranked list with file/line references and fixes is in [`FIX_PROMPT.md`](FIX_PROMPT.md). Do not ship a release until the CRITICAL and HIGH items there are fixed.
+All 20 items in [`FIX_PROMPT.md`](FIX_PROMPT.md) are fixed on `fix/security-pass`, with a regression test each. Still open:
+- Password reset isn't implemented (`/auth/recover` returns 501).
+- `npm run mobile:lint` fails: there is no ESLint config in the repo.
+- `supabase/migrations/*.sql` and the Alembic migrations both describe the schema. Pick one owner before deploying to Supabase.
