@@ -52,6 +52,7 @@ from app.schemas import (
 )
 from app.security import (
     check_rate_limit,
+    client_ip,
     create_access_token,
     get_current_user,
     hash_email,
@@ -108,8 +109,7 @@ def register_user(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    client_ip = request.client.host if request.client else "unknown"
-    check_rate_limit(f"auth:{client_ip}", max_per_minute=20)
+    check_rate_limit(db, f"auth:{client_ip(request)}", max_per_minute=20)
 
     existing = db.query(Profile).filter(Profile.email == payload.email).first()
     if existing:
@@ -146,8 +146,7 @@ def login_user(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    client_ip = request.client.host if request.client else "unknown"
-    check_rate_limit(f"auth:{client_ip}", max_per_minute=20)
+    check_rate_limit(db, f"auth:{client_ip(request)}", max_per_minute=20)
 
     cleaned_email = payload.email.strip().lower()
     profile = db.query(Profile).filter(Profile.email == cleaned_email).first()
@@ -171,9 +170,8 @@ def login_user(
 
 
 @app.post(f"{settings.api_v1_str}/auth/recover")
-def recover_password(payload: Dict[str, str], request: Request):
-    client_ip = request.client.host if request.client else "unknown"
-    check_rate_limit(f"auth:{client_ip}", max_per_minute=10)
+def recover_password(payload: Dict[str, str], request: Request, db: Session = Depends(get_db)):
+    check_rate_limit(db, f"auth:{client_ip(request)}", max_per_minute=10)
     return {
         "status": "dispatched",
         "message": "If the email is registered, a password recovery link has been sent via Supabase Auth.",
@@ -184,9 +182,10 @@ def recover_password(payload: Dict[str, str], request: Request):
 def logout_user(
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
     current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
     if credentials and credentials.credentials:
-        revoke_token(credentials.credentials)
+        revoke_token(db, credentials.credentials)
     return {"status": "logged_out", "user_id": current_user.id}
 
 
@@ -217,7 +216,7 @@ def delete_user_account(
     db.commit()
 
     if credentials and credentials.credentials:
-        revoke_token(credentials.credentials)
+        revoke_token(db, credentials.credentials)
 
     return {
         "deleted": True,

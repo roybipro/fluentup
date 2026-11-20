@@ -28,6 +28,9 @@ class Settings(BaseModel):
     # Security & Operational Safeguards
     rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
     max_request_body_bytes: int = int(os.getenv("MAX_REQUEST_BODY_BYTES", "262144"))
+    # Number of trusted reverse proxies in front of the API (e.g. 1 behind Cloud Run's front end).
+    # 0 means X-Forwarded-For is ignored, so clients can't spoof their IP to dodge rate limits.
+    trusted_proxy_hops: int = int(os.getenv("TRUSTED_PROXY_HOPS", "0"))
 
     @model_validator(mode="after")
     def _require_jwt_secret(self) -> "Settings":

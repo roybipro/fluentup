@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -202,3 +203,24 @@ class SyncReceipt(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
 
     __table_args__ = (UniqueConstraint("user_id", "mutation_id", name="uq_sync_receipt_user_mutation"),)
+
+
+class RevokedToken(Base):
+    """Logged-out / deleted-account tokens, shared by every API instance. Stores a SHA-256, never the token."""
+
+    __tablename__ = "revoked_tokens"
+
+    token_hash = Column(String(64), primary_key=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class RateLimitHit(Base):
+    """Fixed one-minute request counters, shared by every API instance."""
+
+    __tablename__ = "rate_limit_hits"
+
+    bucket_key = Column(String(160), primary_key=True)
+    window_minute = Column(Integer, primary_key=True)
+    hits = Column(Integer, nullable=False, default=0)
+
+    __table_args__ = (Index("ix_rate_limit_hits_window_minute", "window_minute"),)
