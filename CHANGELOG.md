@@ -15,9 +15,7 @@ All notable changes to FluentUp. Format: [Keep a Changelog](https://keepachangel
 
 ### Fixed
 - Offline progress is no longer lost. `POST /sync/batch` now requires sign-in and saves each queued quiz result and flashcard review in one transaction. A `sync_receipts` table (migration `0002_sync_receipts`) makes retries idempotent. The response gives a status for each item (`ok` / `duplicate` / `error`). The app removes only acknowledged items from its queue, keeps items added while a sync is in flight, and keeps guests' queues on the device until they sign in.
-
-### Security — known issues (not yet fixed, see `FIX_PROMPT.md`)
-- **HIGH:** account deletion reports success even when the request fails.
+- Account deletion no longer claims success when the server call fails. Local data is wiped only after the server confirms with a 2xx. Otherwise the user stays signed in and sees an error in English and Bengali.
 
 ## [0.1.0] — 2026-10-26
 

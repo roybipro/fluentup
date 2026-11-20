@@ -17,6 +17,10 @@ import { SyncQueueMutation, useAppStore } from '../store/useAppStore';
 
 const DEFAULT_TIMEOUT_MS = 18000;
 
+const ACCOUNT_DELETION_FAILED_MESSAGE =
+  'We could not delete your account. Nothing was removed and you are still signed in. Check your connection and try again.\n' +
+  'অ্যাকাউন্ট মুছে ফেলা যায়নি। কিছুই মোছা হয়নি এবং আপনি এখনও সাইন ইন অবস্থায় আছেন। ইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।';
+
 export function getApiBaseUrl(): string {
   const extraUrl = Constants.expoConfig?.extra?.apiBaseUrl as string | undefined;
   return extraUrl || process.env.EXPO_PUBLIC_API_BASE_URL || 'http://10.0.2.2:8000/api/v1';
@@ -155,26 +159,30 @@ export async function requestServerAccountDeletion(reason: string): Promise<{ de
     };
   }
 
+  let res: Response;
   try {
-    const res = await fetchWithTimeout(`${getApiBaseUrl()}/auth/account`, {
+    res = await fetchWithTimeout(`${getApiBaseUrl()}/auth/account`, {
       method: 'DELETE',
       body: JSON.stringify({ reason }),
     });
-    if (!res.ok) {
-      throw new Error(`Server returned ${res.status}`);
+  } catch (error) {
+    if (__DEV__) {
+      console.warn('[account] deletion request failed', error);
     }
-    await useAppStore.getState().deleteAccountAndPurgeData();
-    return {
-      deleted: true,
-      message: 'Your FluentUp account, personal profile, and associated learning history have been deleted.',
-    };
-  } catch {
-    // Even if server is offline during dev/test, purge local credentials & state and report honestly
-    await useAppStore.getState().deleteAccountAndPurgeData();
-    return {
-      deleted: true,
-      message:
-        'Local credentials and device data were erased immediately. If your account exists on the remote server, use the Account Deletion portal once online.',
-    };
+    return { deleted: false, message: ACCOUNT_DELETION_FAILED_MESSAGE };
   }
+
+  // Only wipe local data once the server confirms; otherwise the account would still exist remotely.
+  if (!res.ok) {
+    if (__DEV__) {
+      console.warn(`[account] deletion rejected: HTTP ${res.status}`);
+    }
+    return { deleted: false, message: ACCOUNT_DELETION_FAILED_MESSAGE };
+  }
+
+  await useAppStore.getState().deleteAccountAndPurgeData();
+  return {
+    deleted: true,
+    message: 'Your FluentUp account, personal profile, and associated learning history have been deleted.',
+  };
 }
