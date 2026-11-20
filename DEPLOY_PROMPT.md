@@ -12,7 +12,7 @@ You are working in the FluentUp monorepo:
 
 Read `CLAUDE.md`, `FIX_PROMPT.md` and `ARCHITECTURE.md` first. They are the source of truth. Work in two phases: **A. fix**, then **B. deploy**. Do not start phase B until phase A is green.
 
-> **Update 2026-11-20:** Phase A's code fixes are done on `fix/security-pass`. All 20 items are fixed, with commits listed in `FIX_PROMPT.md`. Backend has 41 tests, mobile 30, all green. Migrations and `scripts/smoke_test.sh` pass on Postgres 15. Still open from Phase A: the Docker image build and run checks (Docker wasn't running), the ESLint config, and opening the PR. Start there, then go to Phase B.
+> **Update 2026-11-20:** Phase A's code fixes are done on `fix/security-pass`, merged with `main`'s Supabase Auth change. All 20 items are fixed, with commits listed in `FIX_PROMPT.md`. Backend has 87 tests, mobile 37, all green, and migrations pass on Postgres 15. PR: roybipro/fluentup#8. Still open from Phase A: the Docker image build and run checks (Docker wasn't running), the ESLint config, and green CI on the PR. `scripts/smoke_test.sh` now needs a real Supabase project (see B2.4). Start there, then go to Phase B.
 
 ## Ground rules
 
@@ -108,7 +108,8 @@ The target stack is **Supabase** (Postgres + Auth), **Google Cloud Run** (API), 
 1. Add `apps/backend/.env.example` entries and a short `docs/DEPLOY.md` that lists every required env var:
    - `ENVIRONMENT=production`
    - `DATABASE_URL`
-   - `SUPABASE_JWT_SECRET` (≥32 characters)
+   - `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` (the API refuses to start without them)
+   - `SUPABASE_JWT_SECRET` only if the project still signs with the legacy shared secret (≥32 characters); otherwise tokens are checked with the project's JWKS
    - `GEMINI_API_KEY`
    - `CORS_ALLOWED_ORIGINS` (only if a web client exists; the Android app needs none)
    - `TRUSTED_PROXY_HOPS=1` (check it against a real request on Cloud Run)
@@ -128,7 +129,7 @@ The target stack is **Supabase** (Postgres + Auth), **Google Cloud Run** (API), 
    - AI call with no token → 401
    - `/sync/batch` round trip persists rows
 
-   This already exists: run `scripts/smoke_test.sh "$API_URL/api/v1"`.
+   This already exists: run `scripts/smoke_test.sh "$API_URL/api/v1"`. It registers a throwaway account, so turn off "Confirm email" in Supabase Auth for a staging project, or the register step returns 202 and the script stops.
 
 ### B3. Mobile app (EAS → Play)
 

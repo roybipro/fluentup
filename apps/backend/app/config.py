@@ -1,9 +1,21 @@
 import os
-import secrets
 from typing import List, Optional
 from pydantic import BaseModel, model_validator
 
+# Environments allowed to start without Supabase. Anything else is treated as production.
+LOCAL_ENVIRONMENTS = {"development", "test"}
+MIN_JWT_SECRET_LENGTH = 32
 _DEV_CORS_ORIGINS = ("http://localhost:8081", "http://localhost:19006")
+
+# Published in this repository's history or templates, so they can never protect real accounts.
+PUBLIC_JWT_SECRETS = {
+    "fluentup-dev-jwt-secret-change-in-production-32bytes",
+    "your-supabase-jwt-secret-placeholder",
+}
+
+
+def is_configured(value: str) -> bool:
+    return bool(value) and "placeholder" not in value and "your-project-ref" not in value
 
 
 class Settings(BaseModel):
@@ -18,6 +30,8 @@ class Settings(BaseModel):
     supabase_url: str = os.getenv("SUPABASE_URL", "")
     supabase_anon_key: str = os.getenv("SUPABASE_ANON_KEY", "")
     supabase_service_role_key: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    # Optional: only for projects still signing tokens with the legacy shared secret.
+    # Projects using asymmetric signing keys are verified through their public JWKS endpoint.
     supabase_jwt_secret: str = os.getenv("SUPABASE_JWT_SECRET", "")
 
     # Server-Side LLM Provider Credentials (NEVER exposed to mobile client)
@@ -36,21 +50,26 @@ class Settings(BaseModel):
     cors_allowed_origins_raw: Optional[str] = os.getenv("CORS_ALLOWED_ORIGINS")
 
     @model_validator(mode="after")
-    def _require_jwt_secret(self) -> "Settings":
-        if len(self.supabase_jwt_secret) >= 32:
-            return self
-        if self.environment not in ("development", "test"):
-            raise ValueError("SUPABASE_JWT_SECRET must be set to at least 32 characters outside development/test.")
-        if not self.supabase_jwt_secret:
-            # Random per-process dev secret: tokens stop working on restart, which is fine locally.
-            self.supabase_jwt_secret = secrets.token_urlsafe(32)
-        return self
-
-    @model_validator(mode="after")
     def _reject_wildcard_cors(self) -> "Settings":
         if self.cors_allowed_origins_raw and "*" in self.cors_allowed_origins_raw:
             raise ValueError("CORS_ALLOWED_ORIGINS must list explicit origins; '*' is not allowed.")
         return self
+
+    @property
+    def supabase_issuer(self) -> str:
+        return f"{self.supabase_url.rstrip('/')}/auth/v1"
+
+    @property
+    def supabase_jwks_url(self) -> str:
+        return f"{self.supabase_issuer}/.well-known/jwks.json"
+
+    @property
+    def usable_jwt_secret(self) -> str:
+        """The shared secret, or empty if it is missing, public or too short to trust."""
+        secret = self.supabase_jwt_secret
+        if secret in PUBLIC_JWT_SECRETS or len(secret) < MIN_JWT_SECRET_LENGTH:
+            return ""
+        return secret
 
     @property
     def cors_origins(self) -> List[str]:
@@ -59,8 +78,30 @@ class Settings(BaseModel):
         No defaults outside development/test: production must list its web origins explicitly.
         """
         if self.cors_allowed_origins_raw is None:
-            return list(_DEV_CORS_ORIGINS) if self.environment in ("development", "test") else []
+            return list(_DEV_CORS_ORIGINS) if self.environment in LOCAL_ENVIRONMENTS else []
         return [o.strip() for o in self.cors_allowed_origins_raw.split(",") if o.strip()]
+
+
+def validate_auth_config(config: Settings) -> None:
+    """Stops a deployed backend from starting with auth settings that would leave accounts exposed."""
+    if config.environment in LOCAL_ENVIRONMENTS:
+        return
+
+    problems = [
+        name
+        for name, value in (
+            ("SUPABASE_URL", config.supabase_url),
+            ("SUPABASE_ANON_KEY", config.supabase_anon_key),
+            ("SUPABASE_SERVICE_ROLE_KEY", config.supabase_service_role_key),
+        )
+        if not is_configured(value)
+    ]
+    if config.supabase_jwt_secret and not config.usable_jwt_secret:
+        problems.append("SUPABASE_JWT_SECRET")
+    if problems:
+        raise RuntimeError(
+            f"Refusing to start in '{config.environment}': missing or unsafe {', '.join(problems)}"
+        )
 
 
 settings = Settings()

@@ -28,7 +28,6 @@ class Profile(Base):
 
     id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
     email = Column(String(255), unique=True, nullable=False, index=True)
-    password_hash = Column(String(255), nullable=True)  # bcrypt; NULL for legacy rows (must reset)
     display_name = Column(String(120), nullable=False, default="Learner")
     explanation_language = Column(String(10), nullable=False, default="bn")
     proficiency_level = Column(String(32), nullable=False, default="beginner")

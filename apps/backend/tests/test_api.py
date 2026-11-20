@@ -277,52 +277,6 @@ def test_8_account_deletion_cascades_all_personal_records_and_revokes_token():
         db.close()
 
 
-def test_login_rejects_wrong_password_and_unknown_email_identically():
-    client.post(
-        "/api/v1/auth/register",
-        json={"email": "pw@example.com", "password": "CorrectHorse123!", "display_name": "PW"},
-    )
-    wrong = client.post("/api/v1/auth/login", json={"email": "pw@example.com", "password": "WrongPassword99"})
-    unknown = client.post("/api/v1/auth/login", json={"email": "ghost@example.com", "password": "WrongPassword99"})
-    assert wrong.status_code == 401
-    assert unknown.status_code == 401
-    assert wrong.json() == unknown.json()
-
-    ok = client.post("/api/v1/auth/login", json={"email": "pw@example.com", "password": "CorrectHorse123!"})
-    assert ok.status_code == 200
-    assert ok.json()["access_token"]
-
-
-def test_password_is_stored_hashed():
-    client.post(
-        "/api/v1/auth/register",
-        json={"email": "hash@example.com", "password": "CorrectHorse123!", "display_name": "H"},
-    )
-    db = TestingSessionLocal()
-    try:
-        profile = db.query(Profile).filter(Profile.email == "hash@example.com").one()
-        assert profile.password_hash and "CorrectHorse123!" not in profile.password_hash
-    finally:
-        db.close()
-
-
-@pytest.mark.parametrize("secret", ["", "too-short"])
-def test_production_settings_require_strong_jwt_secret(secret):
-    from app.config import Settings
-
-    with pytest.raises(ValueError, match="SUPABASE_JWT_SECRET"):
-        Settings(environment="production", supabase_jwt_secret=secret)
-
-
-def test_dev_settings_have_no_hardcoded_jwt_secret():
-    from app.config import Settings
-
-    a = Settings(environment="development", supabase_jwt_secret="")
-    b = Settings(environment="development", supabase_jwt_secret="")
-    assert len(a.supabase_jwt_secret) >= 32
-    assert a.supabase_jwt_secret != b.supabase_jwt_secret
-
-
 def _register(email: str) -> dict:
     res = client.post(
         "/api/v1/auth/register",
@@ -549,8 +503,3 @@ def test_oversized_chunked_body_is_rejected():
 
     res = client.post("/api/v1/auth/login", content=chunks(), headers={"Content-Type": "application/json"})
     assert res.status_code == 413
-
-
-def test_password_recovery_is_not_faked():
-    res = client.post("/api/v1/auth/recover", json={"email": "someone@example.com"})
-    assert res.status_code == 501

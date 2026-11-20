@@ -8,8 +8,8 @@ All notable changes to FluentUp. Format: [Keep a Changelog](https://keepachangel
 - Project docs: `CLAUDE.md` (agent guide), `PRD.md`, `ARCHITECTURE.md` (as built), `DESIGN.md`, `FIX_PROMPT.md` (ranked fix list).
 
 ### Security
-- Login now verifies a bcrypt password hash; register stores the hash, never plaintext. Existing accounts without a hash can't log in until they reset their password. Migration `0001_password_hash` adds `profiles.password_hash`.
-- Removed the hardcoded JWT secret fallback. Outside development/test the API refuses to start unless `SUPABASE_JWT_SECRET` is at least 32 characters; dev/test get a random per-process secret.
+- Sign-up, login, password reset and logout go through Supabase Auth, which owns passwords. The API never stores a password or issues its own tokens. Migration `0004_drop_password_hash` removes the short-lived `profiles.password_hash` column that `0001_password_hash` added.
+- Removed the hardcoded JWT secret fallback. Outside development/test the API refuses to start without `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY`, or with a public or short `SUPABASE_JWT_SECRET`.
 - `POST /progress/quiz` ignores client-sent `xp_reward` and `passing_score`. XP and pass marks come from the server lesson catalog (`apps/backend/app/data/lessons.json`), and an unknown `lesson_id` returns 404. A mobile test keeps the catalog in step with `curriculum.ts`.
 - AI endpoints (`/ai/tutor`, `/ai/grammar-check`, `/ai/ielts-evaluate`) require sign-in. A missing or invalid token is a 401, never anonymous; guests use the app's on-device engine. The daily quota is reserved with one conditional `UPDATE`, so concurrent requests can't go over it. A request is refunded when the deterministic fallback answered instead of Gemini. IELTS responses now include `providerStatus`.
 - The access token is stored in `expo-secure-store` (Android Keystore / iOS Keychain), not plaintext AsyncStorage. A token left by an older build is moved over once at startup.
@@ -25,12 +25,12 @@ All notable changes to FluentUp. Format: [Keep a Changelog](https://keepachangel
 - Offline progress is no longer lost. `POST /sync/batch` now requires sign-in and saves each queued quiz result and flashcard review in one transaction. A `sync_receipts` table (migration `0002_sync_receipts`) makes retries idempotent. The response gives a status for each item (`ok` / `duplicate` / `error`). The app removes only acknowledged items from its queue, keeps items added while a sync is in flight, and keeps guests' queues on the device until they sign in.
 - Account deletion no longer claims success when the server call fails. Local data is wiped only after the server confirms with a 2xx. Otherwise the user stays signed in and sees an error in English and Bengali.
 - Logging out no longer deletes unsynced progress without asking. The app tries to sync first. If anything is still unsynced, it warns in English and Bengali and logs out only if the user confirms.
-- "Forgot password" no longer says a reset email was sent when none was. `POST /auth/recover` returns 501 until an email provider is connected, and the app says so in English and Bengali.
+- "Forgot password" now really resets the password: Supabase emails a code, and `POST /auth/recover/confirm` sets the new password and signs out the account's other sessions.
 - API and storage failures are no longer swallowed silently. AI calls still fall back to the on-device engine, and development builds now log why. Corrupt saved state is logged on startup.
 - A non-numeric `Content-Length` header now returns 400 instead of crashing the request with a 500. The body size cap also applies to chunked uploads with no `Content-Length`.
 - Alembic is now the only source of schema. The app no longer runs `create_all` at import. A new baseline migration `0000_baseline` builds the full schema from an empty database, and a test fails if migrations and models drift. `npm run backend:dev` runs migrations first.
 - Token revocation and rate limits now live in Postgres, not process memory, so they hold across several Cloud Run instances. Revoked tokens are stored as SHA-256 hashes, and rate limits use an atomic per-minute counter (migration `0003_shared_security_state`). `X-Forwarded-For` is trusted only when `TRUSTED_PROXY_HOPS` is set, so clients can't spoof their IP to get around limits.
-- JWTs must carry `aud="authenticated"` (the Supabase default) plus `exp` and `sub`. Tokens with a missing or different audience are rejected.
+- Tokens are verified with the Supabase project's public keys (JWKS), or with a real configured HS256 secret. They must carry `aud="authenticated"`, the project's issuer, `exp` and `sub`.
 - CORS has no default origins outside development. `*` is rejected, and credentials mode is off because the API uses bearer tokens, not cookies.
 
 ## [0.1.0] — 2026-10-26

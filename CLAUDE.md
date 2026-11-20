@@ -85,7 +85,6 @@ apps/backend/
 
 ## Known issues (as of 2026-11-20)
 
-All 20 items in [`FIX_PROMPT.md`](FIX_PROMPT.md) are fixed on `fix/security-pass`, with a regression test each. Still open:
-- Password reset isn't implemented (`/auth/recover` returns 501).
+All 20 items in [`FIX_PROMPT.md`](FIX_PROMPT.md) are fixed on `fix/security-pass`, with a regression test each. Auth is Supabase Auth (merged from `main`): the API never stores passwords or issues tokens. Still open:
 - `npm run mobile:lint` fails: there is no ESLint config in the repo.
 - `supabase/migrations/*.sql` and the Alembic migrations both describe the schema. Pick one owner before deploying to Supabase.

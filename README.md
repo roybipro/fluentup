@@ -29,7 +29,7 @@ FluentUp is a production-grade Android application and FastAPI backend engineere
 │       │   ├── main.py              # API routers, CORS, request size limits, idempotency, account deletion
 │       │   ├── models.py            # Normalized SQLAlchemy ORM models with foreign keys & check constraints
 │       │   ├── schemas.py           # Strict Pydantic v2 request/response schemas
-│       │   ├── security.py          # JWT authentication, sliding-window rate limiter, token revocation
+│       │   ├── security.py          # Supabase token verification, sliding-window rate limiter, token revocation
 │       │   └── services/ai_service.py # Server-side Gemini LLM integration + deterministic fallback
 │       ├── alembic/                 # Database migration environment
 │       ├── tests/test_api.py        # Pytest integration, security, isolation, and deletion suite
@@ -100,6 +100,14 @@ npx expo start
    cd apps/backend
    .venv/bin/alembic upgrade head
    ```
+
+### Required Supabase Auth settings
+
+The backend uses Supabase Auth for passwords, confirmation emails and password resets. In production it refuses to start unless `SUPABASE_URL`, `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY` are set.
+
+1. **Authentication → Providers → Email**: keep **Confirm email** on.
+2. **Authentication → Email Templates → Reset Password**: replace the body so it includes the code, for example `Enter this code in the FluentUp app: {{ .Token }}`. The app resets passwords with this code, and Supabase's default template only contains a link, so **password reset will not work without this change**.
+3. **Authentication → SMTP Settings**: configure a custom SMTP provider before launch, because Supabase's built-in sender is heavily rate-limited.
 
 ---
 

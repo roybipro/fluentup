@@ -5,6 +5,7 @@
 #
 # Creates a throwaway account, exercises auth, AI auth, offline sync idempotency and XP,
 # then deletes the account. Exits non-zero on the first failed check. Needs curl and python3.
+# The API must be wired to a Supabase project with email confirmation off (use a staging project).
 set -euo pipefail
 
 API_URL="${1:?usage: smoke_test.sh <API_URL ending in /api/v1>}"
@@ -33,8 +34,9 @@ echo "Smoke testing $API_URL"
 
 [[ "$(call GET /health)" == 200 ]] && pass "GET /health" || fail "GET /health"
 
-[[ "$(call POST /auth/register "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"display_name\":\"Smoke\"}")" == 201 ]] \
-  && pass "register" || fail "register"
+REGISTER_STATUS="$(call POST /auth/register "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"display_name\":\"Smoke\"}")"
+[[ "$REGISTER_STATUS" == 202 ]] && fail "register: Supabase wants email confirmation; turn off 'Confirm email' for this (staging) project"
+[[ "$REGISTER_STATUS" == 201 ]] && pass "register" || fail "register"
 TOKEN="$(json "d['access_token']")"
 
 [[ "$(call POST /auth/login "{\"email\":\"$EMAIL\",\"password\":\"wrong-password-123\"}")" == 401 ]] \

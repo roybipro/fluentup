@@ -1,6 +1,6 @@
 # FluentUp — Production Release Status & Handover Report
 
-**Last Updated:** October 26, 2026  
+**Last Updated:** November 4, 2026  
 **Application Name:** FluentUp  
 **Android Package ID:** `com.fluentup.app`  
 **Version:** `1.0.0` (`versionCode: 1`)  
@@ -8,7 +8,16 @@
 
 ---
 
-## 1. Implemented Features (Verified End-to-End)
+## 0. Authentication Verification (November 4, 2026)
+
+Login previously accepted any password, and a public default JWT secret could be used to forge tokens. Both are fixed; Supabase Auth now owns credentials.
+
+- **Backend:** `ENVIRONMENT=test PYTHONPATH=. .venv/bin/pytest tests -q` (from `apps/backend`) — 60 passed.
+- **Mobile:** `npm run typecheck` exited 0; `npm test -- --ci` — 18 passed.
+- **Live check:** 26 of 26 account lifecycle checks passed with the backend in production mode against a local Docker `supabase/auth:v2.197.0` using ES256 keys and a local mail catcher (sign-up, email confirmation, wrong and right passwords, forged tokens, password reset by code, logout, account deletion).
+- **Not verified:** a hosted Supabase project, real email delivery, or the updated auth screen on an Android device.
+
+## 1. Implemented Features (Not Yet Verified on a Device)
 
 | Module / Requirement | Implementation Status | Key Files |
 | :--- | :--- | :--- |
@@ -33,7 +42,7 @@
   ```bash
   PYTHONPATH=apps/backend apps/backend/.venv/bin/pytest apps/backend/tests -v
   ```
-- **Result:** **8 passed in 3.76s (100% pass rate)**
+- **Result:** **Original suite below; see section 0 for current counts**
   - `test_1_health_check_endpoint` — PASSED
   - `test_2_registration_login_and_duplicate_email_rejection` — PASSED
   - `test_3_user_data_isolation_prevents_cross_user_access` — PASSED (Verified User B gets `403 Forbidden` when attempting to access User A's profile and `0` rows from User A's vocabulary)
@@ -49,7 +58,7 @@
   npm --prefix apps/mobile run typecheck
   npm --prefix apps/mobile test -- --ci
   ```
-- **Result:** **`tsc --noEmit` exited 0 (zero errors)**; **Jest: 11 passed, 11 total in 3.86s**
+- **Result:** **`tsc --noEmit` exited 0 (zero errors)**; **Original Jest suite below; see section 0 for current counts**
   - `1. Validates all seed curriculum learning paths, lessons, and exercises via Zod schema` — PASSED
   - `2. Placement assessment recommends appropriate level based on answers and goal` — PASSED
   - `3. Lesson prerequisite locking works and unlocks after prerequisite completion` — PASSED
@@ -82,7 +91,7 @@ To maintain strict engineering honesty, the following steps require external too
      - **Cloud Build (No local SDK needed):** Run `cd apps/mobile && npx eas-cli build --platform android --profile production`, **or**
      - **Local Gradle Build:** Install JDK 17 (`brew install --cask temurin@17`) and Android Studio SDK, then run `cd apps/mobile/android && ./gradlew bundleRelease`.
 2. **Production Credentials Required in `.env` (Never Committed to Git):**
-   - `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_JWT_SECRET`
+   - `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` (`SUPABASE_JWT_SECRET` only for legacy shared-secret projects), plus the Supabase Auth settings in the README
    - `GEMINI_API_KEY` (Server-side only in `apps/backend/.env`)
    - `ANDROID_KEYSTORE_PATH`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`
 3. **Public Domain Placeholders to Replace Before Google Play Submission:**

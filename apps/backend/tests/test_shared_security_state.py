@@ -40,23 +40,24 @@ def test_rate_limit_counts_are_shared_across_sessions():
             s.close()
 
 
-def _login_with_xff(xff: str):
+def _login_with_xff(xff: str, n: int):
+    # A different email each time, so only the per-IP limit (20/min) can trip, not the per-email one.
     return client.post(
         "/api/v1/auth/login",
-        json={"email": "nobody@example.com", "password": "Password123!"},
+        json={"email": f"nobody{n}@example.com", "password": "Password123!"},
         headers={"X-Forwarded-For": xff},
     )
 
 
 def test_spoofed_forwarded_for_is_ignored_without_trusted_proxy(monkeypatch):
     monkeypatch.setattr(settings, "trusted_proxy_hops", 0)
-    codes = [_login_with_xff(f"203.0.113.{i}").status_code for i in range(21)]
+    codes = [_login_with_xff(f"203.0.113.{i}", i).status_code for i in range(21)]
     assert codes[-1] == 429
 
 
 def test_forwarded_for_is_used_behind_trusted_proxy(monkeypatch):
     monkeypatch.setattr(settings, "trusted_proxy_hops", 1)
-    codes = [_login_with_xff(f"198.51.100.7, 203.0.113.{i}").status_code for i in range(21)]
+    codes = [_login_with_xff(f"198.51.100.7, 203.0.113.{i}", i).status_code for i in range(21)]
     assert 429 not in codes
 
 
