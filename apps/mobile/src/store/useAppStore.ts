@@ -249,7 +249,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       } else {
         set({ isHydrated: true });
       }
-    } catch {
+    } catch (error) {
+      if (__DEV__) console.warn('[storage] hydrate failed, starting from defaults', error);
       set({ isHydrated: true });
     }
   },

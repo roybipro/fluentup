@@ -17,6 +17,16 @@ import { SyncQueueMutation, useAppStore } from '../store/useAppStore';
 
 const DEFAULT_TIMEOUT_MS = 18000;
 
+/**
+ * AI calls fall back to the on-device engine on any failure (the result's providerStatus says so).
+ * Log the cause in development so failures are visible instead of silently swallowed.
+ */
+function logApiFailure(endpoint: string, error: unknown): void {
+  if (__DEV__) {
+    console.warn(`[api] ${endpoint} failed, using on-device fallback`, error);
+  }
+}
+
 const ACCOUNT_DELETION_FAILED_MESSAGE =
   'We could not delete your account. Nothing was removed and you are still signed in. Check your connection and try again.\n' +
   'অ্যাকাউন্ট মুছে ফেলা যায়নি। কিছুই মোছা হয়নি এবং আপনি এখনও সাইন ইন অবস্থায় আছেন। ইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।';
@@ -88,7 +98,8 @@ export async function requestAITutorFeedback(params: {
     }
     const json = await res.json();
     return AITutorFeedbackSchema.parse(json);
-  } catch {
+  } catch (error) {
+    logApiFailure('ai-tutor', error);
     return buildFallbackTutorFeedback({
       scenarioTitle: params.scenarioTitle,
       userMessage: params.userMessage,
@@ -118,7 +129,8 @@ export async function requestGrammarCheck(params: {
     }
     const json = await res.json();
     return GrammarCheckResultSchema.parse(json);
-  } catch {
+  } catch (error) {
+    logApiFailure('grammar-check', error);
     return analyzeGrammarLocally(trimmed);
   }
 }
@@ -139,7 +151,8 @@ export async function requestIELTSEvaluation(params: {
     }
     const json = await res.json();
     return IELTSEvaluationSchema.parse(json);
-  } catch {
+  } catch (error) {
+    logApiFailure('ielts-evaluate', error);
     return evaluateIELTSResponseLocally({
       moduleType: params.moduleType,
       taskId: params.taskId,
