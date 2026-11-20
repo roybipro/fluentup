@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
 import {
   ExplanationLanguage,
   GrammarCheckResult,
@@ -17,6 +18,29 @@ import {
 } from '../services/learningEngine';
 
 export const STORAGE_KEY = 'fluentup.app.state.v1';
+/** The access token lives only in the OS keychain/keystore, never in the AsyncStorage blob. */
+export const AUTH_TOKEN_KEY = 'fluentup.auth.accessToken';
+
+async function writeAuthToken(token: string | null): Promise<void> {
+  try {
+    if (token) {
+      await SecureStore.setItemAsync(AUTH_TOKEN_KEY, token);
+    } else {
+      await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY);
+    }
+  } catch (error) {
+    if (__DEV__) console.warn('[auth] secure token write failed', error);
+  }
+}
+
+async function readAuthToken(): Promise<string | null> {
+  try {
+    return await SecureStore.getItemAsync(AUTH_TOKEN_KEY);
+  } catch (error) {
+    if (__DEV__) console.warn('[auth] secure token read failed', error);
+    return null;
+  }
+}
 
 export interface LessonProgressRecord {
   lessonId: string;
@@ -182,8 +206,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         const parsed = JSON.parse(raw);
         // Check session expiration if authenticated
         let validSession: AuthSession | null = parsed.authSession ?? null;
-        if (validSession && !validSession.isGuest && validSession.expiresAt < Date.now()) {
-          validSession = null;
+        const legacyToken = validSession?.accessToken || '';
+        if (validSession && !validSession.isGuest) {
+          if (legacyToken) {
+            // One-time migration: older builds stored the token in plaintext AsyncStorage.
+            await writeAuthToken(legacyToken);
+          }
+          const token = (await readAuthToken()) ?? legacyToken;
+          validSession = token && validSession.expiresAt >= Date.now() ? { ...validSession, accessToken: token } : null;
         }
         set({
           themeMode: parsed.themeMode ?? 'light',
@@ -206,6 +236,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           lastSyncedAt: parsed.lastSyncedAt ?? null,
           isHydrated: true,
         });
+        if (legacyToken) {
+          await get().persistToStorage();
+        }
       } else {
         set({ isHydrated: true });
       }
@@ -216,9 +249,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   persistToStorage: async () => {
     const state = get();
+    const session = state.authSession;
+    await writeAuthToken(session && !session.isGuest ? session.accessToken || null : null);
     const serializable = {
       themeMode: state.themeMode,
-      authSession: state.authSession,
+      authSession: session ? { ...session, accessToken: '' } : null,
       hasCompletedOnboarding: state.hasCompletedOnboarding,
       preferences: state.preferences,
       totalXp: state.totalXp,
@@ -238,8 +273,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     };
     try {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
-    } catch {
-      // Ignore storage quota errors in fallback
+    } catch (error) {
+      if (__DEV__) console.warn('[storage] persist failed', error);
     }
   },
 
@@ -329,6 +364,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   deleteAccountAndPurgeData: async () => {
     await AsyncStorage.removeItem(STORAGE_KEY);
+    await writeAuthToken(null);
     set({
       authSession: null,
       hasCompletedOnboarding: false,

@@ -41,3 +41,16 @@ jest.mock('expo-av', () => ({
     },
   },
 }));
+
+// Mock expo-secure-store with an in-memory keychain, exposed for assertions.
+const mockSecureStore: Record<string, string> = {};
+(globalThis as unknown as { __mockSecureStore: Record<string, string> }).__mockSecureStore = mockSecureStore;
+jest.mock('expo-secure-store', () => ({
+  getItemAsync: jest.fn(async (key: string) => (key in mockSecureStore ? mockSecureStore[key] : null)),
+  setItemAsync: jest.fn(async (key: string, value: string) => {
+    mockSecureStore[key] = value;
+  }),
+  deleteItemAsync: jest.fn(async (key: string) => {
+    delete mockSecureStore[key];
+  }),
+}));
