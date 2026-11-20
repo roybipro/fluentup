@@ -21,9 +21,29 @@ const ACCOUNT_DELETION_FAILED_MESSAGE =
   'We could not delete your account. Nothing was removed and you are still signed in. Check your connection and try again.\n' +
   'অ্যাকাউন্ট মুছে ফেলা যায়নি। কিছুই মোছা হয়নি এবং আপনি এখনও সাইন ইন অবস্থায় আছেন। ইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।';
 
+const DEV_EMULATOR_API_URL = 'http://10.0.2.2:8000/api/v1';
+
+/**
+ * Release builds must be given an HTTPS API URL (EXPO_PUBLIC_API_BASE_URL). Only development
+ * builds may fall back to the Android emulator host.
+ */
+export function resolveApiBaseUrl(candidate: string | undefined, isDev: boolean): string {
+  const url = (candidate ?? '').trim().replace(/\/+$/, '');
+  if (isDev) {
+    return url || DEV_EMULATOR_API_URL;
+  }
+  if (!url) {
+    throw new Error('EXPO_PUBLIC_API_BASE_URL is not set for this release build.');
+  }
+  if (!url.startsWith('https://')) {
+    throw new Error('Release builds require an HTTPS API URL.');
+  }
+  return url;
+}
+
 export function getApiBaseUrl(): string {
   const extraUrl = Constants.expoConfig?.extra?.apiBaseUrl as string | undefined;
-  return extraUrl || process.env.EXPO_PUBLIC_API_BASE_URL || 'http://10.0.2.2:8000/api/v1';
+  return resolveApiBaseUrl(extraUrl || process.env.EXPO_PUBLIC_API_BASE_URL, __DEV__);
 }
 
 async function fetchWithTimeout(

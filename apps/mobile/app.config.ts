@@ -8,6 +8,12 @@ const PACKAGE_ID = process.env.APP_PACKAGE_ID || 'com.fluentup.app';
 const VERSION_NAME = process.env.APP_VERSION_NAME || '1.0.0';
 const VERSION_CODE = Number(process.env.APP_VERSION_CODE || '1');
 
+// Fail release builds on the EAS builder early instead of shipping an app that can't reach the API.
+const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL;
+if (IS_PRODUCTION && process.env.EAS_BUILD === 'true' && !API_BASE_URL?.startsWith('https://')) {
+  throw new Error('EXPO_PUBLIC_API_BASE_URL must be set to an https:// URL for production EAS builds.');
+}
+
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: 'FluentUp',
@@ -66,9 +72,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     versionCode: VERSION_CODE,
     targetSdkVersion: 36,
     minSdkVersion: 24,
-    apiBaseUrl:
-      process.env.EXPO_PUBLIC_API_BASE_URL ||
-      (IS_PRODUCTION ? 'https://api.fluentup.example.com/api/v1' : 'http://10.0.2.2:8000/api/v1'),
+    // No placeholder fallback: release builds must set EXPO_PUBLIC_API_BASE_URL (HTTPS).
+    // apiClient.resolveApiBaseUrl enforces this at runtime; dev builds fall back to 10.0.2.2.
+    apiBaseUrl: API_BASE_URL,
     privacyPolicyUrl:
       process.env.EXPO_PUBLIC_PRIVACY_POLICY_URL ||
       'https://YOUR_DOMAIN_PLACEHOLDER.example.com/privacy',
