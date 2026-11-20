@@ -16,7 +16,11 @@ All notable changes to FluentUp. Format: [Keep a Changelog](https://keepachangel
 - Release builds no longer fall back to `http://10.0.2.2` or a placeholder host. They need `EXPO_PUBLIC_API_BASE_URL` set to an `https://` URL, which is checked at runtime and fails production EAS builds early. Only `__DEV__` builds use the emulator fallback.
 - The Gemini API key is sent in the `x-goog-api-key` header instead of the `?key=` query string, so it stays out of URLs and logs.
 
+### Changed
+- Backend runtime dependencies are leaner. `pytest` moved to `requirements-dev.txt`, which CI now installs, and the unused `pydantic-settings` was removed.
+
 ### Fixed
+- The production API image now ships the Postgres driver (`psycopg[binary]`). Without it, a `postgresql+psycopg://` `DATABASE_URL` failed at startup.
 - Offline progress is no longer lost. `POST /sync/batch` now requires sign-in and saves each queued quiz result and flashcard review in one transaction. A `sync_receipts` table (migration `0002_sync_receipts`) makes retries idempotent. The response gives a status for each item (`ok` / `duplicate` / `error`). The app removes only acknowledged items from its queue, keeps items added while a sync is in flight, and keeps guests' queues on the device until they sign in.
 - Account deletion no longer claims success when the server call fails. Local data is wiped only after the server confirms with a 2xx. Otherwise the user stays signed in and sees an error in English and Bengali.
 - Logging out no longer deletes unsynced progress without asking. The app tries to sync first. If anything is still unsynced, it warns in English and Bengali and logs out only if the user confirms.
