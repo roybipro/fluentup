@@ -14,6 +14,7 @@ All notable changes to FluentUp. Format: [Keep a Changelog](https://keepachangel
 - AI endpoints (`/ai/tutor`, `/ai/grammar-check`, `/ai/ielts-evaluate`) require sign-in. A missing or invalid token is a 401, never anonymous; guests use the app's on-device engine. The daily quota is reserved with one conditional `UPDATE`, so concurrent requests can't go over it. A request is refunded when the deterministic fallback answered instead of Gemini. IELTS responses now include `providerStatus`.
 - The access token is stored in `expo-secure-store` (Android Keystore / iOS Keychain), not plaintext AsyncStorage. A token left by an older build is moved over once at startup.
 - Release builds no longer fall back to `http://10.0.2.2` or a placeholder host. They need `EXPO_PUBLIC_API_BASE_URL` set to an `https://` URL, which is checked at runtime and fails production EAS builds early. Only `__DEV__` builds use the emulator fallback.
+- The Gemini API key is sent in the `x-goog-api-key` header instead of the `?key=` query string, so it stays out of URLs and logs.
 
 ### Fixed
 - Offline progress is no longer lost. `POST /sync/batch` now requires sign-in and saves each queued quiz result and flashcard review in one transaction. A `sync_receipts` table (migration `0002_sync_receipts`) makes retries idempotent. The response gives a status for each item (`ok` / `duplicate` / `error`). The app removes only acknowledged items from its queue, keeps items added while a sync is in flight, and keeps guests' queues on the device until they sign in.

@@ -149,8 +149,10 @@ async def call_gemini_json(system_instruction: str, user_prompt: str) -> Dict[st
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{settings.gemini_model}:generateContent?key={api_key}"
+        f"{settings.gemini_model}:generateContent"
     )
+    # Key goes in a header so it never appears in URLs, proxy logs or error messages.
+    headers = {"x-goog-api-key": api_key}
     payload = {
         "systemInstruction": {"parts": [{"text": system_instruction}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
@@ -161,7 +163,7 @@ async def call_gemini_json(system_instruction: str, user_prompt: str) -> Dict[st
     }
 
     async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
-        resp = await client.post(url, json=payload)
+        resp = await client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         body = resp.json()
         text = body["candidates"][0]["content"]["parts"][0]["text"]
