@@ -572,3 +572,24 @@ def test_ai_quota_reservation_is_atomic_across_stale_sessions():
     finally:
         for s in sessions:
             s.close()
+
+
+def test_non_numeric_content_length_is_400_not_500():
+    res = client.post(
+        "/api/v1/auth/login",
+        content=b'{"email":"a@b.co","password":"Password123!"}',
+        headers={"Content-Type": "application/json", "Content-Length": "abc"},
+    )
+    assert res.status_code == 400
+
+
+def test_oversized_chunked_body_is_rejected():
+    from app.config import settings
+
+    def chunks():
+        piece = b" " * 65536
+        for _ in range(settings.max_request_body_bytes // len(piece) + 2):
+            yield piece
+
+    res = client.post("/api/v1/auth/login", content=chunks(), headers={"Content-Type": "application/json"})
+    assert res.status_code == 413

@@ -21,6 +21,7 @@ All notable changes to FluentUp. Format: [Keep a Changelog](https://keepachangel
 - Account deletion no longer claims success when the server call fails. Local data is wiped only after the server confirms with a 2xx. Otherwise the user stays signed in and sees an error in English and Bengali.
 - Logging out no longer deletes unsynced progress without asking. The app tries to sync first. If anything is still unsynced, it warns in English and Bengali and logs out only if the user confirms.
 - API and storage failures are no longer swallowed silently. AI calls still fall back to the on-device engine, and development builds now log why. Corrupt saved state is logged on startup.
+- A non-numeric `Content-Length` header now returns 400 instead of crashing the request with a 500. The body size cap also applies to chunked uploads with no `Content-Length`.
 
 ## [0.1.0] — 2026-10-26
 

@@ -4,7 +4,6 @@ from typing import Dict
 import bcrypt
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import ValidationError
 from sqlalchemy import case, or_, update
@@ -13,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.lessons import get_lesson_rules
+from app.middleware import RequestSizeLimitMiddleware
 from app.database import Base, engine, get_db
 from app.models import (
     AccountDeletionRequest,
@@ -83,15 +83,7 @@ app.add_middleware(
 )
 
 
-@app.middleware("http")
-async def enforce_request_size_limit(request: Request, call_next):
-    content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > settings.max_request_body_bytes:
-        return JSONResponse(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            content={"detail": "Request payload exceeds maximum allowed size."},
-        )
-    return await call_next(request)
+app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
 
 
 # ==============================================================================
