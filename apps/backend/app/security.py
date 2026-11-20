@@ -117,18 +117,3 @@ def get_current_user(
         )
 
     return profile
-
-
-def get_optional_user(
-    request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
-    db: Session = Depends(get_db),
-) -> Optional[Profile]:
-    client_ip = request.client.host if request.client else "unknown"
-    check_rate_limit(f"ip:{client_ip}")
-    if credentials is None or not credentials.credentials:
-        return None
-    try:
-        return get_current_user(request=request, credentials=credentials, db=db)
-    except HTTPException:
-        return None

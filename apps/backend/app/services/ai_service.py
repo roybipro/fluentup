@@ -251,6 +251,7 @@ async def generate_ielts_evaluation(req: IELTSEvaluateRequest) -> IELTSEvaluateR
         )
         raw["isUnofficialEstimate"] = True
         raw["disclaimer"] = disclaimer_text
+        raw["providerStatus"] = "live_ai"
         return IELTSEvaluateResponse.model_validate(raw)
     except Exception:
         words = len(req.userResponse.strip().split())

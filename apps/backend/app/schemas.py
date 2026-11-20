@@ -185,6 +185,7 @@ class IELTSEvaluateResponse(BaseModel):
     improvementsEn: List[str]
     improvementsBn: List[str]
     improvedSampleResponse: str
+    providerStatus: Literal["live_ai", "offline_fallback"] = "offline_fallback"
 
 
 class SyncMutationItem(BaseModel):

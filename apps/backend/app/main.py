@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import ValidationError
+from sqlalchemy import case, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -53,7 +54,6 @@ from app.security import (
     check_rate_limit,
     create_access_token,
     get_current_user,
-    get_optional_user,
     hash_email,
     revoke_token,
     security_scheme,
@@ -633,62 +633,94 @@ def sync_offline_mutations(
 # ==============================================================================
 # AI ENGLISH TUTOR, GRAMMAR CHECKER & IELTS EVALUATOR
 # ==============================================================================
-def _check_and_increment_ai_quota(user: Profile | None, db: Session) -> None:
-    if not user:
-        return
-    today = datetime.now(timezone.utc).date()
-    if user.ai_quota_date != today:
-        user.ai_quota_date = today
-        user.ai_requests_today = 0
+def reserve_ai_quota(db: Session, user: Profile, limit: int) -> bool:
+    """Atomically take one AI request from today's quota. Returns False when the quota is used up.
 
+    A single conditional UPDATE, so concurrent requests can't both pass a stale read and overshoot.
+    """
+    today = datetime.now(timezone.utc).date()
+    stmt = (
+        update(Profile)
+        .where(Profile.id == user.id)
+        .where(
+            or_(
+                Profile.ai_quota_date.is_(None),
+                Profile.ai_quota_date != today,
+                Profile.ai_requests_today < limit,
+            )
+        )
+        .values(
+            ai_requests_today=case((Profile.ai_quota_date == today, Profile.ai_requests_today + 1), else_=1),
+            ai_quota_date=today,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    granted = db.execute(stmt).rowcount == 1
+    db.commit()
+    return granted
+
+
+def _release_ai_quota(db: Session, user: Profile) -> None:
+    """Give back a reserved request when the deterministic fallback answered instead of the live model."""
+    today = datetime.now(timezone.utc).date()
+    db.execute(
+        update(Profile)
+        .where(Profile.id == user.id, Profile.ai_quota_date == today, Profile.ai_requests_today > 0)
+        .values(ai_requests_today=Profile.ai_requests_today - 1)
+        .execution_options(synchronize_session=False)
+    )
+
+
+def _require_ai_quota(db: Session, user: Profile) -> None:
     limit = (
         settings.ai_max_daily_requests_premium
         if user.subscription_tier == "premium"
         else settings.ai_max_daily_requests_free
     )
-    if user.ai_requests_today >= limit:
+    if not reserve_ai_quota(db, user, limit):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Daily AI practice limit ({limit} requests) reached for your tier.",
         )
-    user.ai_requests_today += 1
-    db.commit()
 
 
 @app.post(f"{settings.api_v1_str}/ai/tutor", response_model=AITutorResponse)
 async def ai_tutor_endpoint(
     payload: AITutorRequest,
-    current_user: Profile | None = Depends(get_optional_user),
+    current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _check_and_increment_ai_quota(current_user, db)
+    _require_ai_quota(db, current_user)
     feedback = await generate_tutor_feedback(payload)
+    if feedback.providerStatus != "live_ai":
+        _release_ai_quota(db, current_user)
 
-    if current_user:
-        session_record = SpeakingSession(
+    db.add(
+        SpeakingSession(
             user_id=current_user.id,
             scenario_id=payload.scenarioId,
             mode="ai_tutor",
             user_transcript=payload.userMessage,
             structured_feedback=feedback.model_dump(),
         )
-        db.add(session_record)
-        db.commit()
-
+    )
+    db.commit()
     return feedback
 
 
 @app.post(f"{settings.api_v1_str}/ai/grammar-check", response_model=GrammarCheckResponse)
 async def ai_grammar_endpoint(
     payload: GrammarCheckRequest,
-    current_user: Profile | None = Depends(get_optional_user),
+    current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _check_and_increment_ai_quota(current_user, db)
+    _require_ai_quota(db, current_user)
     result = await generate_grammar_check(payload)
+    if result.providerStatus != "live_ai":
+        _release_ai_quota(db, current_user)
 
-    if current_user:
-        record = GrammarCheck(
+    db.add(
+        GrammarCheck(
             user_id=current_user.id,
             original_text=result.originalText,
             corrected_text=result.correctedText,
@@ -696,23 +728,24 @@ async def ai_grammar_endpoint(
             explanations=[e.model_dump() for e in result.explanations],
             practice_exercise=result.practiceExercise.model_dump(),
         )
-        db.add(record)
-        db.commit()
-
+    )
+    db.commit()
     return result
 
 
 @app.post(f"{settings.api_v1_str}/ai/ielts-evaluate", response_model=IELTSEvaluateResponse)
 async def ai_ielts_endpoint(
     payload: IELTSEvaluateRequest,
-    current_user: Profile | None = Depends(get_optional_user),
+    current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _check_and_increment_ai_quota(current_user, db)
+    _require_ai_quota(db, current_user)
     evaluation = await generate_ielts_evaluation(payload)
+    if evaluation.providerStatus != "live_ai":
+        _release_ai_quota(db, current_user)
 
-    if current_user:
-        attempt = IELTSAttempt(
+    db.add(
+        IELTSAttempt(
             user_id=current_user.id,
             module_type=payload.moduleType,
             task_id=payload.taskId,
@@ -721,7 +754,6 @@ async def ai_ielts_endpoint(
             estimated_band=evaluation.estimatedBand,
             is_unofficial_estimate=True,
         )
-        db.add(attempt)
-        db.commit()
-
+    )
+    db.commit()
     return evaluation

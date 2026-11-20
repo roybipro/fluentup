@@ -219,9 +219,11 @@ def test_5_api_validation_rejects_inconsistent_quiz_scores_and_empty_grammar():
 
 
 def test_6_ai_provider_failure_handling_and_unofficial_ielts_disclaimers():
+    headers = _register("ai6@example.com")
     # Without a live GEMINI_API_KEY, the endpoints must gracefully return validated fallback schemas
     tutor_res = client.post(
         "/api/v1/ai/tutor",
+        headers=headers,
         json={
             "scenarioId": "scen-interview",
             "scenarioTitle": "Job Interview",
@@ -236,6 +238,7 @@ def test_6_ai_provider_failure_handling_and_unofficial_ielts_disclaimers():
 
     ielts_res = client.post(
         "/api/v1/ai/ielts-evaluate",
+        headers=headers,
         json={
             "moduleType": "writing",
             "taskId": "ielts-wrt-t2",
@@ -521,3 +524,51 @@ def test_sync_batch_partial_failure_reports_per_item_status():
 def test_sync_batch_requires_auth():
     res = client.post("/api/v1/sync/batch", json={"mutations": []})
     assert res.status_code == 401
+
+
+_TUTOR_BODY = {
+    "scenarioId": "scen-interview",
+    "scenarioTitle": "Job Interview",
+    "userMessage": "I am working here since 3 years.",
+    "explanationLanguage": "en",
+}
+
+
+@pytest.mark.parametrize("path,body", [
+    ("/api/v1/ai/tutor", _TUTOR_BODY),
+    ("/api/v1/ai/grammar-check", {"text": "He go to school.", "explanationLanguage": "en"}),
+    ("/api/v1/ai/ielts-evaluate", {"moduleType": "writing", "taskId": "t", "userResponse": "Some text."}),
+])
+def test_ai_endpoints_reject_missing_and_invalid_tokens(path, body):
+    assert client.post(path, json=body).status_code == 401
+    garbage = client.post(path, json=body, headers={"Authorization": "Bearer not-a-real-token"})
+    assert garbage.status_code == 401
+
+
+def test_offline_fallback_does_not_use_ai_quota():
+    headers = _register("fallbackquota@example.com")
+    res = client.post("/api/v1/ai/tutor", headers=headers, json=_TUTOR_BODY)
+    assert res.status_code == 200
+    assert res.json()["providerStatus"] == "offline_fallback"
+    db = TestingSessionLocal()
+    try:
+        assert db.query(Profile).filter(Profile.email == "fallbackquota@example.com").one().ai_requests_today == 0
+    finally:
+        db.close()
+
+
+def test_ai_quota_reservation_is_atomic_across_stale_sessions():
+    from app.main import reserve_ai_quota
+
+    _register("quota@example.com")
+    limit = 3
+    sessions = [TestingSessionLocal() for _ in range(limit + 1)]
+    try:
+        # Every session loads the profile before anyone reserves, like concurrent requests would.
+        users = [s.query(Profile).filter(Profile.email == "quota@example.com").one() for s in sessions]
+        granted = [reserve_ai_quota(s, u, limit) for s, u in zip(sessions, users)]
+        assert granted.count(True) == limit
+        assert granted.count(False) == 1
+    finally:
+        for s in sessions:
+            s.close()
