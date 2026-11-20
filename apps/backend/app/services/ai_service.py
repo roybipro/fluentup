@@ -112,11 +112,13 @@ def deterministic_grammar_check(req: GrammarCheckRequest) -> GrammarCheckRespons
             )
         )
 
-    natural = (
-        f"From my perspective, {corrected[0].lower() + corrected[1:]}"
-        if len(corrected) < 65
-        else corrected
-    )
+    natural = corrected
+    if len(corrected) < 65 and not corrected.rstrip().endswith("?"):
+        # Keep the pronoun "I" (and I'm, I've...) capitalised when it moves mid-sentence.
+        first_word = corrected.split(" ", 1)[0]
+        keep_case = first_word == "I" or first_word.startswith("I'")
+        lead = corrected if keep_case else corrected[0].lower() + corrected[1:]
+        natural = f"From my perspective, {lead}"
 
     return GrammarCheckResponse(
         originalText=original,
