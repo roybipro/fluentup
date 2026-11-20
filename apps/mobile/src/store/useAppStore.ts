@@ -130,7 +130,14 @@ export interface AppState {
   completeOnboarding: (prefs: OnboardingPreferences) => void;
   signInUser: (session: AuthSession) => void;
   continueAsGuest: () => void;
-  logoutUser: () => Promise<void>;
+  /**
+   * Tries to sync first. If items are still unsynced it does NOT log out unless
+   * `discardUnsynced` is set, so the UI can warn the user before work is lost.
+   */
+  logoutUser: (options?: { syncExecutor?: SyncExecutor; discardUnsynced?: boolean }) => Promise<{
+    loggedOut: boolean;
+    unsyncedCount: number;
+  }>;
   deleteAccountAndPurgeData: () => Promise<void>;
 
   // Learning Actions
@@ -353,13 +360,22 @@ export const useAppStore = create<AppState>((set, get) => ({
     void get().persistToStorage();
   },
 
-  logoutUser: async () => {
+  logoutUser: async (options = {}) => {
+    const { syncExecutor, discardUnsynced = false } = options;
+    if (get().syncQueue.length > 0 && syncExecutor) {
+      await get().flushSyncQueue(syncExecutor);
+    }
+    const unsyncedCount = get().syncQueue.length;
+    if (unsyncedCount > 0 && !discardUnsynced) {
+      return { loggedOut: false, unsyncedCount };
+    }
     set({
       authSession: null,
       syncQueue: [],
       syncStatus: 'idle',
     });
     await get().persistToStorage();
+    return { loggedOut: true, unsyncedCount };
   },
 
   deleteAccountAndPurgeData: async () => {

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import {
+  Alert,
   ScrollView,
   StyleSheet,
   Text,
@@ -32,6 +33,24 @@ export default function ProfileScreen() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteReason, setDeleteReason] = useState('No longer using the application');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  const handleLogout = async () => {
+    const res = await logoutUser({ syncExecutor: syncMutationsToServer });
+    if (res.loggedOut) return;
+    Alert.alert(
+      'Unsynced progress / সিঙ্ক হয়নি এমন অগ্রগতি',
+      `${res.unsyncedCount} update(s) have not reached the server yet. If you log out now they will be lost.\n` +
+        `${res.unsyncedCount}টি আপডেট এখনও সার্ভারে পৌঁছায়নি। এখন লগ আউট করলে সেগুলো হারিয়ে যাবে।`,
+      [
+        { text: 'Stay signed in / সাইন ইন থাকুন', style: 'cancel' },
+        {
+          text: 'Log out anyway / তবুও লগ আউট',
+          style: 'destructive',
+          onPress: () => void logoutUser({ discardUnsynced: true }),
+        },
+      ]
+    );
+  };
 
   const handleConfirmAccountDeletion = async () => {
     const res = await requestServerAccountDeletion(deleteReason);
@@ -76,7 +95,7 @@ export default function ProfileScreen() {
             accessibilityRole="button"
             accessibilityLabel="Log Out of Account"
             style={[styles.outlineBtn, { borderColor: palette.danger }]}
-            onPress={() => void logoutUser()}
+            onPress={() => void handleLogout()}
           >
             <Text style={{ color: palette.danger, fontWeight: '700' }}>Log Out</Text>
           </TouchableOpacity>
