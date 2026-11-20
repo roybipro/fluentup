@@ -1,7 +1,9 @@
 import os
 import secrets
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel, model_validator
+
+_DEV_CORS_ORIGINS = ("http://localhost:8081", "http://localhost:19006")
 
 
 class Settings(BaseModel):
@@ -31,6 +33,7 @@ class Settings(BaseModel):
     # Number of trusted reverse proxies in front of the API (e.g. 1 behind Cloud Run's front end).
     # 0 means X-Forwarded-For is ignored, so clients can't spoof their IP to dodge rate limits.
     trusted_proxy_hops: int = int(os.getenv("TRUSTED_PROXY_HOPS", "0"))
+    cors_allowed_origins_raw: Optional[str] = os.getenv("CORS_ALLOWED_ORIGINS")
 
     @model_validator(mode="after")
     def _require_jwt_secret(self) -> "Settings":
@@ -43,13 +46,21 @@ class Settings(BaseModel):
             self.supabase_jwt_secret = secrets.token_urlsafe(32)
         return self
 
+    @model_validator(mode="after")
+    def _reject_wildcard_cors(self) -> "Settings":
+        if self.cors_allowed_origins_raw and "*" in self.cors_allowed_origins_raw:
+            raise ValueError("CORS_ALLOWED_ORIGINS must list explicit origins; '*' is not allowed.")
+        return self
+
     @property
     def cors_origins(self) -> List[str]:
-        raw = os.getenv(
-            "CORS_ALLOWED_ORIGINS",
-            "http://localhost:8081,http://localhost:19006,https://fluentup.example.com",
-        )
-        return [o.strip() for o in raw.split(",") if o.strip()]
+        """Browser origins allowed to call the API. The native app doesn't need CORS at all.
+
+        No defaults outside development/test: production must list its web origins explicitly.
+        """
+        if self.cors_allowed_origins_raw is None:
+            return list(_DEV_CORS_ORIGINS) if self.environment in ("development", "test") else []
+        return [o.strip() for o in self.cors_allowed_origins_raw.split(",") if o.strip()]
 
 
 settings = Settings()

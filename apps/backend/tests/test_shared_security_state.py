@@ -80,3 +80,23 @@ def test_tokens_without_the_authenticated_audience_are_rejected(claims):
     )
     res = client.get("/api/v1/profile/me", headers={"Authorization": f"Bearer {token}"})
     assert res.status_code == 401
+
+
+def test_cors_has_no_default_origins_outside_development():
+    from app.config import Settings
+
+    prod = Settings(environment="production", supabase_jwt_secret="x" * 32, cors_allowed_origins_raw=None)
+    assert prod.cors_origins == []
+    dev = Settings(environment="development", supabase_jwt_secret="", cors_allowed_origins_raw=None)
+    assert all(o.startswith("http://localhost") for o in dev.cors_origins)
+    explicit = Settings(
+        environment="production", supabase_jwt_secret="x" * 32, cors_allowed_origins_raw="https://app.example.org, "
+    )
+    assert explicit.cors_origins == ["https://app.example.org"]
+
+
+def test_cors_wildcard_is_rejected():
+    from app.config import Settings
+
+    with pytest.raises(ValueError, match="CORS"):
+        Settings(environment="production", supabase_jwt_secret="x" * 32, cors_allowed_origins_raw="*")
