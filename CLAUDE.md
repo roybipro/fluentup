@@ -26,8 +26,9 @@ npm run mobile:android      # run on Android emulator/device
 npm run mobile:test         # Jest
 npm run mobile:typecheck    # tsc --noEmit
 npm run mobile:lint
-npm run backend:dev         # uvicorn app.main:app --reload --port 8000
-npm run backend:test        # pytest (see gotcha below)
+npm run backend:migrate     # alembic upgrade head
+npm run backend:dev         # migrate, then uvicorn app.main:app --reload --port 8000
+npm run backend:test        # pytest
 npm run typecheck && npm test   # what CI runs; must be green before you finish
 ```
 
@@ -35,10 +36,9 @@ Backend setup: `cd apps/backend && python3 -m venv .venv && .venv/bin/pip instal
 
 ## Gotchas
 
-- **`npm run backend:test` fails with `ModuleNotFoundError: No module named 'app'`** until `apps/backend/pytest.ini` has `pythonpath = .`. Workaround: `cd apps/backend && PYTHONPATH=. .venv/bin/pytest`.
-- Android emulator reaches the host at `10.0.2.2`. The API URL comes from `EXPO_PUBLIC_API_URL`.
+- Android emulator reaches the host at `10.0.2.2`. The API URL comes from `EXPO_PUBLIC_API_BASE_URL` (release builds require `https://`).
 - `docs/ARCHITECTURE.md` describes the **target** design (Supabase Auth, SecureStore, idempotent XP). The code does not do all of that yet. Root `ARCHITECTURE.md` describes what actually runs.
-- `main.py` calls `Base.metadata.create_all` at import, alongside Alembic. Don't rely on it. Write a migration for every schema change.
+- Alembic is the only schema source. The app never creates tables (`npm run backend:dev` runs `alembic upgrade head` first). Write a migration for every schema change; `tests/test_migrations.py` fails if migrations and models drift.
 
 ## Layout
 

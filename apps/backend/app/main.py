@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.lessons import get_lesson_rules
 from app.middleware import RequestSizeLimitMiddleware
-from app.database import Base, engine, get_db
+from app.database import get_db
 from app.models import (
     AccountDeletionRequest,
     GrammarCheck,
@@ -64,8 +64,7 @@ from app.services.ai_service import (
     generate_tutor_feedback,
 )
 
-# Initialize database tables for local/test environments
-Base.metadata.create_all(bind=engine)
+# Schema is owned by Alembic (`alembic upgrade head`); the app never creates tables itself.
 
 app = FastAPI(
     title=settings.project_name,
