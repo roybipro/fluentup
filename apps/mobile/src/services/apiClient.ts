@@ -6,6 +6,7 @@ import {
   GrammarCheckResultSchema,
   IELTSEvaluation,
   IELTSEvaluationSchema,
+  SyncBatchResponseSchema,
 } from '../schemas/domain';
 import {
   analyzeGrammarLocally,
@@ -123,16 +124,25 @@ export async function requestIELTSEvaluation(params: {
   }
 }
 
-export async function syncMutationsToServer(mutations: SyncQueueMutation[]): Promise<boolean> {
-  try {
-    const res = await fetchWithTimeout(`${getApiBaseUrl()}/sync/batch`, {
-      method: 'POST',
-      body: JSON.stringify({ mutations }),
-    });
-    return res.ok;
-  } catch {
-    return false;
+/**
+ * Sends queued mutations and resolves to the ids the server acknowledged ("ok" or "duplicate").
+ * Rejects on network, HTTP or response-shape errors so the caller keeps the whole queue.
+ */
+export async function syncMutationsToServer(mutations: SyncQueueMutation[]): Promise<string[]> {
+  const res = await fetchWithTimeout(`${getApiBaseUrl()}/sync/batch`, {
+    method: 'POST',
+    body: JSON.stringify({ mutations }),
+  });
+  if (!res.ok) {
+    throw new Error(`Sync failed: HTTP ${res.status}`);
   }
+  const body = SyncBatchResponseSchema.parse(await res.json());
+  if (__DEV__) {
+    for (const r of body.results) {
+      if (r.status === 'error') console.warn(`[sync] server rejected ${r.id}: ${r.detail ?? 'unknown error'}`);
+    }
+  }
+  return body.results.filter((r) => r.status === 'ok' || r.status === 'duplicate').map((r) => r.id);
 }
 
 export async function requestServerAccountDeletion(reason: string): Promise<{ deleted: boolean; message: string }> {

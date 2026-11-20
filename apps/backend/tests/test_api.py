@@ -422,3 +422,102 @@ def test_unknown_lesson_returns_404():
         },
     )
     assert res.status_code == 404
+
+
+def _quiz_mutation(mid: str, sub_id: str, lesson_id: str = "lesson-beg-1") -> dict:
+    return {
+        "id": mid,
+        "type": "lesson_quiz_completed",
+        "payload": {
+            "lessonId": lesson_id,
+            "clientSubmissionId": sub_id,
+            "scorePercent": 100,
+            "correctCount": 5,
+            "totalQuestions": 5,
+            "xpEarned": 999,
+        },
+        "createdAt": "2026-11-20T10:00:00Z",
+        "retryCount": 0,
+    }
+
+
+def _vocab_mutation(mid: str, word: str) -> dict:
+    return {
+        "id": mid,
+        "type": "vocabulary_upserted",
+        "payload": {
+            "card": {
+                "id": f"vocab-{word}",
+                "wordOrPhrase": word,
+                "meaningBn": "",
+                "definitionEn": f"Definition of {word}",
+                "exampleSentence": "",
+                "phonetic": "/x/",
+                "isFavorite": True,
+                "repetitionNumber": 2,
+                "easinessFactor": 2.6,
+                "intervalDays": 3,
+                "nextReviewAt": "2026-11-23T10:00:00Z",
+                "lastReviewedAt": "2026-11-20T10:00:00Z",
+                "reviewHistory": [],
+            }
+        },
+        "createdAt": "2026-11-20T10:00:00Z",
+        "retryCount": 0,
+    }
+
+
+def test_sync_batch_persists_items_and_is_idempotent():
+    headers = _register("sync@example.com")
+    batch = {"mutations": [_quiz_mutation("m-1", "sub-sync-1"), _vocab_mutation("m-2", "diligent")]}
+
+    first = client.post("/api/v1/sync/batch", headers=headers, json=batch)
+    assert first.status_code == 200
+    assert [r["status"] for r in first.json()["results"]] == ["ok", "ok"]
+
+    second = client.post("/api/v1/sync/batch", headers=headers, json=batch)
+    assert second.status_code == 200
+    assert [r["status"] for r in second.json()["results"]] == ["duplicate", "duplicate"]
+
+    db = TestingSessionLocal()
+    try:
+        assert db.query(QuizAttempt).filter(QuizAttempt.client_submission_id == "sub-sync-1").count() == 1
+        vocab = db.query(UserVocabulary).filter(UserVocabulary.word_or_phrase == "diligent").all()
+        assert len(vocab) == 1
+        assert vocab[0].interval_days == 3 and vocab[0].is_favorite is True
+        # Client-claimed xpEarned (999) is ignored; lesson-beg-1 is worth 25.
+        assert db.query(Profile).filter(Profile.email == "sync@example.com").one().total_xp == 25
+    finally:
+        db.close()
+
+
+def test_sync_batch_partial_failure_reports_per_item_status():
+    headers = _register("syncpartial@example.com")
+    batch = {
+        "mutations": [
+            _quiz_mutation("p-1", "sub-partial-1"),
+            _quiz_mutation("p-2", "sub-partial-2", lesson_id="lesson-missing"),
+            _vocab_mutation("p-3", "tenacious"),
+            {"id": "p-4", "type": "not_a_real_type", "payload": {}, "createdAt": "x", "retryCount": 0},
+        ]
+    }
+    res = client.post("/api/v1/sync/batch", headers=headers, json=batch)
+    assert res.status_code == 200
+    assert [r["status"] for r in res.json()["results"]] == ["ok", "error", "ok", "error"]
+
+    db = TestingSessionLocal()
+    try:
+        assert db.query(QuizAttempt).filter(QuizAttempt.client_submission_id == "sub-partial-1").count() == 1
+        assert db.query(QuizAttempt).filter(QuizAttempt.client_submission_id == "sub-partial-2").count() == 0
+        assert db.query(UserVocabulary).filter(UserVocabulary.word_or_phrase == "tenacious").count() == 1
+    finally:
+        db.close()
+
+    # A failed item is retried later and succeeds once fixed (no receipt was stored for it).
+    retry = client.post("/api/v1/sync/batch", headers=headers, json={"mutations": [_quiz_mutation("p-2", "sub-partial-2")]})
+    assert retry.json()["results"][0]["status"] == "ok"
+
+
+def test_sync_batch_requires_auth():
+    res = client.post("/api/v1/sync/batch", json={"mutations": []})
+    assert res.status_code == 401

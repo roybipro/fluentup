@@ -50,6 +50,9 @@ export interface SyncQueueMutation {
   retryCount: number;
 }
 
+/** Resolves to the ids of mutations the server acknowledged ("ok" or "duplicate"). */
+export type SyncExecutor = (mutations: SyncQueueMutation[]) => Promise<string[]>;
+
 export interface AuthSession {
   userId: string;
   email: string;
@@ -126,7 +129,11 @@ export interface AppState {
   recordIELTSAttempt: (evalResult: IELTSEvaluation, userResponse: string) => void;
 
   // Sync Actions
-  flushSyncQueue: (syncExecutor?: (mutations: SyncQueueMutation[]) => Promise<boolean>) => Promise<boolean>;
+  /**
+   * Sends the queue with `syncExecutor`, which resolves to the ids the server acknowledged.
+   * Only acknowledged items leave the queue. Resolves true when every sent item was acknowledged.
+   */
+  flushSyncQueue: (syncExecutor: SyncExecutor) => Promise<boolean>;
 }
 
 const DEFAULT_PREFERENCES: OnboardingPreferences = {
@@ -598,36 +605,44 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ syncStatus: 'offline_queued' });
       return false;
     }
+    if (!state.authSession || state.authSession.isGuest) {
+      // Guests have no server account; keep the queue on device until they sign in.
+      set({ syncStatus: state.syncQueue.length > 0 ? 'offline_queued' : 'idle' });
+      return false;
+    }
     if (state.syncQueue.length === 0) {
       set({ syncStatus: 'synced', lastSyncedAt: new Date().toISOString() });
       return true;
     }
 
+    const batch = state.syncQueue;
+    const sentIds = new Set(batch.map((m) => m.id));
+    const bumpUnacked = (queue: SyncQueueMutation[], acked: Set<string>) =>
+      queue
+        .filter((m) => !acked.has(m.id))
+        .map((m) => (sentIds.has(m.id) ? { ...m, retryCount: m.retryCount + 1 } : m));
+
     set({ syncStatus: 'syncing' });
+    let acked: Set<string>;
     try {
-      const ok = syncExecutor ? await syncExecutor(state.syncQueue) : true;
-      if (ok) {
-        const nowIso = new Date().toISOString();
-        set({
-          syncQueue: [],
-          syncStatus: 'synced',
-          lastSyncedAt: nowIso,
-        });
-        await get().persistToStorage();
-        return true;
+      acked = new Set(await syncExecutor(batch));
+    } catch (error) {
+      if (__DEV__) {
+        console.warn('[sync] batch failed', error);
       }
-      set({ syncStatus: 'error' });
-      return false;
-    } catch {
-      set((prev) => ({
-        syncStatus: 'error',
-        syncQueue: prev.syncQueue.map((item) => ({
-          ...item,
-          retryCount: item.retryCount + 1,
-        })),
-      }));
+      set((prev) => ({ syncStatus: 'error', syncQueue: bumpUnacked(prev.syncQueue, new Set()) }));
       await get().persistToStorage();
       return false;
     }
+
+    const allAcked = batch.every((m) => acked.has(m.id));
+    set((prev) => ({
+      // Items enqueued while the request was in flight are kept untouched.
+      syncQueue: bumpUnacked(prev.syncQueue, acked),
+      syncStatus: allAcked ? 'synced' : 'error',
+      lastSyncedAt: allAcked ? new Date().toISOString() : prev.lastSyncedAt,
+    }));
+    await get().persistToStorage();
+    return allAcked;
   },
 }));

@@ -6,6 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials
+from pydantic import ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -20,6 +21,7 @@ from app.models import (
     Profile,
     QuizAttempt,
     SpeakingSession,
+    SyncReceipt,
     UserVocabulary,
 )
 from app.schemas import (
@@ -38,6 +40,12 @@ from app.schemas import (
     QuizSubmissionRequest,
     QuizSubmissionResponse,
     SyncBatchRequest,
+    SyncBatchResponse,
+    SyncItemResult,
+    SyncMutationItem,
+    SyncQuizPayload,
+    SyncVocabularyCard,
+    SyncVocabularyPayload,
     VocabularyItemResponse,
     VocabularyUpsertRequest,
 )
@@ -540,16 +548,86 @@ def upsert_vocabulary(
 # ==============================================================================
 # OFFLINE SYNC BATCH ENDPOINT
 # ==============================================================================
-@app.post(f"{settings.api_v1_str}/sync/batch")
+def _apply_vocabulary_card(db: Session, user: Profile, card: SyncVocabularyCard) -> None:
+    word = card.wordOrPhrase.strip()
+    row = (
+        db.query(UserVocabulary)
+        .filter(UserVocabulary.user_id == user.id, UserVocabulary.word_or_phrase == word)
+        .first()
+    )
+    if row is None:
+        row = UserVocabulary(user_id=user.id, word_or_phrase=word, review_history=[])
+        db.add(row)
+    row.meaning_bn = card.meaningBn
+    row.definition_en = card.definitionEn
+    row.example_sentence = card.exampleSentence
+    row.phonetic = card.phonetic
+    row.is_favorite = card.isFavorite
+    row.repetition_number = card.repetitionNumber
+    row.easiness_factor = card.easinessFactor
+    row.interval_days = card.intervalDays
+    row.next_review_at = card.nextReviewAt
+    row.last_reviewed_at = card.lastReviewedAt
+    db.flush()
+
+
+def _apply_sync_mutation(db: Session, user: Profile, mutation: SyncMutationItem) -> SyncItemResult:
+    already = (
+        db.query(SyncReceipt)
+        .filter(SyncReceipt.user_id == user.id, SyncReceipt.mutation_id == mutation.id)
+        .first()
+    )
+    if already:
+        return SyncItemResult(id=mutation.id, status="duplicate")
+
+    savepoint = db.begin_nested()
+    try:
+        item_status = "ok"
+        if mutation.type == "lesson_quiz_completed":
+            quiz = SyncQuizPayload.model_validate(mutation.payload)
+            result = record_quiz_attempt(
+                db,
+                user,
+                lesson_id=quiz.lessonId,
+                client_submission_id=quiz.clientSubmissionId,
+                score_percent=quiz.scorePercent,
+                correct_count=quiz.correctCount,
+                total_questions=quiz.totalQuestions,
+                mistakes=quiz.mistakes,
+            )
+            if result.duplicate_submission:
+                item_status = "duplicate"
+        elif mutation.type == "vocabulary_upserted":
+            _apply_vocabulary_card(db, user, SyncVocabularyPayload.model_validate(mutation.payload).card)
+        else:
+            raise ValueError(f"Unsupported mutation type: {mutation.type}")
+
+        db.add(SyncReceipt(user_id=user.id, mutation_id=mutation.id, mutation_type=mutation.type))
+        db.flush()
+        savepoint.commit()
+        return SyncItemResult(id=mutation.id, status=item_status)
+    except HTTPException as exc:
+        savepoint.rollback()
+        return SyncItemResult(id=mutation.id, status="error", detail=str(exc.detail))
+    except (ValidationError, ValueError, IntegrityError) as exc:
+        savepoint.rollback()
+        detail = exc.errors()[0]["msg"] if isinstance(exc, ValidationError) else str(exc).splitlines()[0]
+        return SyncItemResult(id=mutation.id, status="error", detail=detail[:200])
+
+
+@app.post(f"{settings.api_v1_str}/sync/batch", response_model=SyncBatchResponse)
 def sync_offline_mutations(
     payload: SyncBatchRequest,
-    current_user: Profile | None = Depends(get_optional_user),
+    current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    return {
-        "synced": True,
-        "processed_count": len(payload.mutations),
-        "user_id": current_user.id if current_user else "guest",
-    }
+    """Apply queued offline mutations in one transaction (one savepoint per item).
+
+    The client must drop only items acknowledged "ok" or "duplicate" and keep the rest queued.
+    """
+    results = [_apply_sync_mutation(db, current_user, m) for m in payload.mutations]
+    db.commit()
+    return SyncBatchResponse(results=results)
 
 
 # ==============================================================================

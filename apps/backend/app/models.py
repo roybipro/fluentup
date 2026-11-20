@@ -188,3 +188,17 @@ class AccountDeletionRequest(Base):
     reason = Column(String(255), nullable=True)
     requested_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     processed_at = Column(DateTime(timezone=True), nullable=True, default=utcnow)
+
+
+class SyncReceipt(Base):
+    """One row per offline mutation the server has applied, so retried batches are idempotent."""
+
+    __tablename__ = "sync_receipts"
+
+    id = Column(String(64), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(64), ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False, index=True)
+    mutation_id = Column(String(160), nullable=False)
+    mutation_type = Column(String(48), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (UniqueConstraint("user_id", "mutation_id", name="uq_sync_receipt_user_mutation"),)
