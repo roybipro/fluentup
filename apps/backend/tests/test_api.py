@@ -362,3 +362,63 @@ def test_dev_settings_have_no_hardcoded_jwt_secret():
     b = Settings(environment="development", supabase_jwt_secret="")
     assert len(a.supabase_jwt_secret) >= 32
     assert a.supabase_jwt_secret != b.supabase_jwt_secret
+
+
+def _register(email: str) -> dict:
+    res = client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": "Password123!", "display_name": "T"},
+    )
+    assert res.status_code == 201
+    return {"Authorization": f"Bearer {res.json()['access_token']}"}
+
+
+def test_client_cannot_set_xp_reward_or_passing_score():
+    headers = _register("xpcheat@example.com")
+    # lesson-beg-1 is worth 25 XP with a 70% pass mark on the server.
+    cheat = client.post(
+        "/api/v1/progress/quiz",
+        headers=headers,
+        json={
+            "lesson_id": "lesson-beg-1",
+            "client_submission_id": "sub-cheat-1",
+            "score_percent": 60,
+            "correct_count": 3,
+            "total_questions": 5,
+            "xp_reward": 200,
+            "passing_score": 50,
+        },
+    )
+    assert cheat.status_code == 200
+    assert cheat.json()["passed"] is False
+    assert cheat.json()["xp_earned"] == 0
+
+    honest = client.post(
+        "/api/v1/progress/quiz",
+        headers=headers,
+        json={
+            "lesson_id": "lesson-beg-1",
+            "client_submission_id": "sub-cheat-2",
+            "score_percent": 100,
+            "correct_count": 5,
+            "total_questions": 5,
+            "xp_reward": 200,
+        },
+    )
+    assert honest.json()["xp_earned"] == 25
+
+
+def test_unknown_lesson_returns_404():
+    headers = _register("nolesson@example.com")
+    res = client.post(
+        "/api/v1/progress/quiz",
+        headers=headers,
+        json={
+            "lesson_id": "lesson-does-not-exist",
+            "client_submission_id": "sub-404",
+            "score_percent": 100,
+            "correct_count": 5,
+            "total_questions": 5,
+        },
+    )
+    assert res.status_code == 404

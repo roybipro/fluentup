@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.lessons import get_lesson_rules
 from app.database import Base, engine, get_db
 from app.models import (
     AccountDeletionRequest,
@@ -286,20 +287,33 @@ def update_my_profile(
 # ==============================================================================
 # PROGRESS & QUIZ SCORING (Transactional & Idempotent — prevents duplicate XP)
 # ==============================================================================
-@app.post(f"{settings.api_v1_str}/progress/quiz", response_model=QuizSubmissionResponse)
-def submit_quiz_attempt(
-    payload: QuizSubmissionRequest,
-    current_user: Profile = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    if payload.correct_count > payload.total_questions:
+def record_quiz_attempt(
+    db: Session,
+    user: Profile,
+    *,
+    lesson_id: str,
+    client_submission_id: str,
+    score_percent: int,
+    correct_count: int,
+    total_questions: int,
+    mistakes: list,
+) -> QuizSubmissionResponse:
+    """Validate and stage a quiz attempt. XP and pass mark come from the server catalog.
+
+    Does not commit; the caller owns the transaction.
+    """
+    rules = get_lesson_rules(lesson_id)
+    if rules is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown lesson_id.")
+
+    if total_questions <= 0 or correct_count < 0 or correct_count > total_questions:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="correct_count cannot exceed total_questions.",
+            detail="correct_count must be between 0 and total_questions.",
         )
 
-    expected_pct = round((payload.correct_count / payload.total_questions) * 100)
-    if abs(expected_pct - payload.score_percent) > 1:
+    expected_pct = round((correct_count / total_questions) * 100)
+    if abs(expected_pct - score_percent) > 1:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Inconsistent score_percent relative to correct_count and total_questions.",
@@ -308,11 +322,11 @@ def submit_quiz_attempt(
     # Check idempotency key first
     existing_attempt = (
         db.query(QuizAttempt)
-        .filter(QuizAttempt.client_submission_id == payload.client_submission_id)
+        .filter(QuizAttempt.client_submission_id == client_submission_id)
         .first()
     )
     if existing_attempt:
-        if existing_attempt.user_id != current_user.id:
+        if existing_attempt.user_id != user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Submission ID belongs to another user.",
@@ -321,32 +335,32 @@ def submit_quiz_attempt(
             lesson_id=existing_attempt.lesson_id,
             client_submission_id=existing_attempt.client_submission_id,
             score_percent=existing_attempt.score_percent,
-            passed=existing_attempt.score_percent >= payload.passing_score,
+            passed=existing_attempt.score_percent >= rules.passing_score,
             xp_earned=0,
-            total_xp=current_user.total_xp,
+            total_xp=user.total_xp,
             duplicate_submission=True,
         )
 
     progress = (
         db.query(LessonProgress)
         .filter(
-            LessonProgress.user_id == current_user.id,
-            LessonProgress.lesson_id == payload.lesson_id,
+            LessonProgress.user_id == user.id,
+            LessonProgress.lesson_id == lesson_id,
         )
         .first()
     )
 
-    passed = payload.score_percent >= payload.passing_score
+    passed = score_percent >= rules.passing_score
     already_awarded = bool(progress and progress.xp_awarded)
-    xp_earned = payload.xp_reward if (passed and not already_awarded) else 0
+    xp_earned = rules.xp_reward if (passed and not already_awarded) else 0
 
     now = datetime.now(timezone.utc)
     if not progress:
         progress = LessonProgress(
-            user_id=current_user.id,
-            lesson_id=payload.lesson_id,
+            user_id=user.id,
+            lesson_id=lesson_id,
             status="completed" if passed else "in_progress",
-            best_score=payload.score_percent,
+            best_score=score_percent,
             attempts_count=1,
             xp_awarded=bool(xp_earned > 0),
             completed_at=now if passed else None,
@@ -354,26 +368,57 @@ def submit_quiz_attempt(
         db.add(progress)
     else:
         progress.attempts_count += 1
-        progress.best_score = max(progress.best_score, payload.score_percent)
+        progress.best_score = max(progress.best_score, score_percent)
         if passed:
             progress.status = "completed"
             progress.completed_at = progress.completed_at or now
         if xp_earned > 0:
             progress.xp_awarded = True
 
-    attempt = QuizAttempt(
-        user_id=current_user.id,
+    db.add(
+        QuizAttempt(
+            user_id=user.id,
+            lesson_id=lesson_id,
+            client_submission_id=client_submission_id,
+            score_percent=score_percent,
+            correct_count=correct_count,
+            total_questions=total_questions,
+            xp_earned=xp_earned,
+            mistakes=mistakes,
+        )
+    )
+    user.total_xp += xp_earned
+    db.flush()
+
+    return QuizSubmissionResponse(
+        lesson_id=lesson_id,
+        client_submission_id=client_submission_id,
+        score_percent=score_percent,
+        passed=passed,
+        xp_earned=xp_earned,
+        total_xp=user.total_xp,
+        duplicate_submission=False,
+    )
+
+
+@app.post(f"{settings.api_v1_str}/progress/quiz", response_model=QuizSubmissionResponse)
+def submit_quiz_attempt(
+    payload: QuizSubmissionRequest,
+    current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    result = record_quiz_attempt(
+        db,
+        current_user,
         lesson_id=payload.lesson_id,
         client_submission_id=payload.client_submission_id,
         score_percent=payload.score_percent,
         correct_count=payload.correct_count,
         total_questions=payload.total_questions,
-        xp_earned=xp_earned,
         mistakes=payload.mistakes,
     )
-    db.add(attempt)
-
-    current_user.total_xp += xp_earned
+    if result.duplicate_submission:
+        return result
     try:
         db.commit()
     except IntegrityError:
@@ -382,17 +427,7 @@ def submit_quiz_attempt(
             status_code=status.HTTP_409_CONFLICT,
             detail="Concurrent duplicate quiz submission detected.",
         )
-
-    db.refresh(current_user)
-    return QuizSubmissionResponse(
-        lesson_id=payload.lesson_id,
-        client_submission_id=payload.client_submission_id,
-        score_percent=payload.score_percent,
-        passed=passed,
-        xp_earned=xp_earned,
-        total_xp=current_user.total_xp,
-        duplicate_submission=False,
-    )
+    return result
 
 
 # ==============================================================================

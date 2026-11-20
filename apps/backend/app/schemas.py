@@ -60,14 +60,8 @@ class QuizSubmissionRequest(BaseModel):
     score_percent: int = Field(..., ge=0, le=100)
     correct_count: int = Field(..., ge=0)
     total_questions: int = Field(..., gt=0)
-    xp_reward: int = Field(default=25, ge=0, le=200)
-    passing_score: int = Field(default=70, ge=50, le=100)
+    # XP and pass mark are looked up server-side from app/data/lessons.json; never sent by the client.
     mistakes: List[Dict[str, Any]] = Field(default_factory=list)
-
-    @field_validator("correct_count")
-    @classmethod
-    def check_correct_le_total(cls, v: int, info) -> int:  # type: ignore
-        return v
 
 
 class QuizSubmissionResponse(BaseModel):
