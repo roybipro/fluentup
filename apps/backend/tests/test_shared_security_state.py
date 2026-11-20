@@ -58,3 +58,25 @@ def test_forwarded_for_is_used_behind_trusted_proxy(monkeypatch):
     monkeypatch.setattr(settings, "trusted_proxy_hops", 1)
     codes = [_login_with_xff(f"198.51.100.7, 203.0.113.{i}").status_code for i in range(21)]
     assert 429 not in codes
+
+
+@pytest.mark.parametrize("claims", [{}, {"aud": "some-other-service"}])
+def test_tokens_without_the_authenticated_audience_are_rejected(claims):
+    import time as _time
+
+    import jwt as pyjwt
+
+    _register("aud@example.com")
+    db = TestingSessionLocal()
+    try:
+        from app.models import Profile
+
+        user_id = db.query(Profile).filter(Profile.email == "aud@example.com").one().id
+    finally:
+        db.close()
+    now = int(_time.time())
+    token = pyjwt.encode(
+        {"sub": user_id, "iat": now, "exp": now + 600, **claims}, settings.supabase_jwt_secret, algorithm="HS256"
+    )
+    res = client.get("/api/v1/profile/me", headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 401

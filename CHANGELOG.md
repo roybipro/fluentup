@@ -24,6 +24,7 @@ All notable changes to FluentUp. Format: [Keep a Changelog](https://keepachangel
 - A non-numeric `Content-Length` header now returns 400 instead of crashing the request with a 500. The body size cap also applies to chunked uploads with no `Content-Length`.
 - Alembic is now the only source of schema. The app no longer runs `create_all` at import. A new baseline migration `0000_baseline` builds the full schema from an empty database, and a test fails if migrations and models drift. `npm run backend:dev` runs migrations first.
 - Token revocation and rate limits now live in Postgres, not process memory, so they hold across several Cloud Run instances. Revoked tokens are stored as SHA-256 hashes, and rate limits use an atomic per-minute counter (migration `0003_shared_security_state`). `X-Forwarded-For` is trusted only when `TRUSTED_PROXY_HOPS` is set, so clients can't spoof their IP to get around limits.
+- JWTs must carry `aud="authenticated"` (the Supabase default) plus `exp` and `sub`. Tokens with a missing or different audience are rejected.
 
 ## [0.1.0] — 2026-10-26
 
