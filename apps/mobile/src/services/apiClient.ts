@@ -6,6 +6,7 @@ import {
   GrammarCheckResultSchema,
   IELTSEvaluation,
   IELTSEvaluationSchema,
+  SyncBatchResponseSchema,
 } from '../schemas/domain';
 import {
   analyzeGrammarLocally,
@@ -16,9 +17,43 @@ import { SyncQueueMutation, useAppStore } from '../store/useAppStore';
 
 const DEFAULT_TIMEOUT_MS = 18000;
 
+/**
+ * AI calls fall back to the on-device engine on any failure (the result's providerStatus says so).
+ * Log the cause in development so failures are visible instead of silently swallowed.
+ */
+function logApiFailure(endpoint: string, error: unknown): void {
+  if (__DEV__) {
+    console.warn(`[api] ${endpoint} failed, using on-device fallback`, error);
+  }
+}
+
+const ACCOUNT_DELETION_FAILED_MESSAGE =
+  'We could not delete your account. Nothing was removed and you are still signed in. Check your connection and try again.\n' +
+  'অ্যাকাউন্ট মুছে ফেলা যায়নি। কিছুই মোছা হয়নি এবং আপনি এখনও সাইন ইন অবস্থায় আছেন। ইন্টারনেট সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।';
+
+const DEV_EMULATOR_API_URL = 'http://10.0.2.2:8000/api/v1';
+
+/**
+ * Release builds must be given an HTTPS API URL (EXPO_PUBLIC_API_BASE_URL). Only development
+ * builds may fall back to the Android emulator host.
+ */
+export function resolveApiBaseUrl(candidate: string | undefined, isDev: boolean): string {
+  const url = (candidate ?? '').trim().replace(/\/+$/, '');
+  if (isDev) {
+    return url || DEV_EMULATOR_API_URL;
+  }
+  if (!url) {
+    throw new Error('EXPO_PUBLIC_API_BASE_URL is not set for this release build.');
+  }
+  if (!url.startsWith('https://')) {
+    throw new Error('Release builds require an HTTPS API URL.');
+  }
+  return url;
+}
+
 export function getApiBaseUrl(): string {
   const extraUrl = Constants.expoConfig?.extra?.apiBaseUrl as string | undefined;
-  return extraUrl || process.env.EXPO_PUBLIC_API_BASE_URL || 'http://10.0.2.2:8000/api/v1';
+  return resolveApiBaseUrl(extraUrl || process.env.EXPO_PUBLIC_API_BASE_URL, __DEV__);
 }
 
 async function fetchWithTimeout(
@@ -63,7 +98,8 @@ export async function requestAITutorFeedback(params: {
     }
     const json = await res.json();
     return AITutorFeedbackSchema.parse(json);
-  } catch {
+  } catch (error) {
+    logApiFailure('ai-tutor', error);
     return buildFallbackTutorFeedback({
       scenarioTitle: params.scenarioTitle,
       userMessage: params.userMessage,
@@ -93,7 +129,8 @@ export async function requestGrammarCheck(params: {
     }
     const json = await res.json();
     return GrammarCheckResultSchema.parse(json);
-  } catch {
+  } catch (error) {
+    logApiFailure('grammar-check', error);
     return analyzeGrammarLocally(trimmed);
   }
 }
@@ -114,7 +151,8 @@ export async function requestIELTSEvaluation(params: {
     }
     const json = await res.json();
     return IELTSEvaluationSchema.parse(json);
-  } catch {
+  } catch (error) {
+    logApiFailure('ielts-evaluate', error);
     return evaluateIELTSResponseLocally({
       moduleType: params.moduleType,
       taskId: params.taskId,
@@ -123,16 +161,25 @@ export async function requestIELTSEvaluation(params: {
   }
 }
 
-export async function syncMutationsToServer(mutations: SyncQueueMutation[]): Promise<boolean> {
-  try {
-    const res = await fetchWithTimeout(`${getApiBaseUrl()}/sync/batch`, {
-      method: 'POST',
-      body: JSON.stringify({ mutations }),
-    });
-    return res.ok;
-  } catch {
-    return false;
+/**
+ * Sends queued mutations and resolves to the ids the server acknowledged ("ok" or "duplicate").
+ * Rejects on network, HTTP or response-shape errors so the caller keeps the whole queue.
+ */
+export async function syncMutationsToServer(mutations: SyncQueueMutation[]): Promise<string[]> {
+  const res = await fetchWithTimeout(`${getApiBaseUrl()}/sync/batch`, {
+    method: 'POST',
+    body: JSON.stringify({ mutations }),
+  });
+  if (!res.ok) {
+    throw new Error(`Sync failed: HTTP ${res.status}`);
   }
+  const body = SyncBatchResponseSchema.parse(await res.json());
+  if (__DEV__) {
+    for (const r of body.results) {
+      if (r.status === 'error') console.warn(`[sync] server rejected ${r.id}: ${r.detail ?? 'unknown error'}`);
+    }
+  }
+  return body.results.filter((r) => r.status === 'ok' || r.status === 'duplicate').map((r) => r.id);
 }
 
 export async function requestServerAccountDeletion(reason: string): Promise<{ deleted: boolean; message: string }> {
@@ -145,24 +192,30 @@ export async function requestServerAccountDeletion(reason: string): Promise<{ de
     };
   }
 
+  let res: Response;
   try {
-    const res = await fetchWithTimeout(`${getApiBaseUrl()}/auth/account`, {
+    res = await fetchWithTimeout(`${getApiBaseUrl()}/auth/account`, {
       method: 'DELETE',
       body: JSON.stringify({ reason }),
     });
-    if (!res.ok) {
-      throw new Error(`Server returned ${res.status}`);
+  } catch (error) {
+    if (__DEV__) {
+      console.warn('[account] deletion request failed', error);
     }
-    await useAppStore.getState().deleteAccountAndPurgeData();
-    return {
-      deleted: true,
-      message: 'Your FluentUp account, personal profile, and associated learning history have been deleted.',
-    };
-  } catch {
-    // Keep the session so the user can retry: without it they could no longer delete the account.
-    return {
-      deleted: false,
-      message: 'Your account could not be deleted right now, and nothing was removed. Please check your connection and try again.',
-    };
+    return { deleted: false, message: ACCOUNT_DELETION_FAILED_MESSAGE };
   }
+
+  // Only wipe local data once the server confirms; otherwise the account would still exist remotely.
+  if (!res.ok) {
+    if (__DEV__) {
+      console.warn(`[account] deletion rejected: HTTP ${res.status}`);
+    }
+    return { deleted: false, message: ACCOUNT_DELETION_FAILED_MESSAGE };
+  }
+
+  await useAppStore.getState().deleteAccountAndPurgeData();
+  return {
+    deleted: true,
+    message: 'Your FluentUp account, personal profile, and associated learning history have been deleted.',
+  };
 }

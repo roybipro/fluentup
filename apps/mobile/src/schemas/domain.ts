@@ -192,3 +192,14 @@ export const IELTSEvaluationSchema = z.object({
   improvedSampleResponse: z.string(),
 });
 export type IELTSEvaluation = z.infer<typeof IELTSEvaluationSchema>;
+
+export const SyncBatchResponseSchema = z.object({
+  results: z.array(
+    z.object({
+      id: z.string(),
+      status: z.enum(['ok', 'duplicate', 'error']),
+      detail: z.string().nullable().optional(),
+    })
+  ),
+});
+export type SyncBatchResponse = z.infer<typeof SyncBatchResponseSchema>;

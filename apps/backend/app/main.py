@@ -1,14 +1,17 @@
 from datetime import datetime, timedelta, timezone
-from typing import Dict
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials
+from pydantic import ValidationError
+from sqlalchemy import case, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings, validate_auth_config
-from app.database import Base, engine, get_db
+from app.lessons import get_lesson_rules
+from app.middleware import RequestSizeLimitMiddleware
+from app.database import get_db
 from app.models import (
     AccountDeletionRequest,
     GrammarCheck,
@@ -17,6 +20,7 @@ from app.models import (
     Profile,
     QuizAttempt,
     SpeakingSession,
+    SyncReceipt,
     UserVocabulary,
 )
 from app.schemas import (
@@ -37,13 +41,19 @@ from app.schemas import (
     QuizSubmissionRequest,
     QuizSubmissionResponse,
     SyncBatchRequest,
+    SyncBatchResponse,
+    SyncItemResult,
+    SyncMutationItem,
+    SyncQuizPayload,
+    SyncVocabularyCard,
+    SyncVocabularyPayload,
     VocabularyItemResponse,
     VocabularyUpsertRequest,
 )
 from app.security import (
     check_rate_limit,
+    client_ip,
     get_current_user,
-    get_optional_user,
     hash_email,
     revoke_token,
     security_scheme,
@@ -62,8 +72,7 @@ from app.services.ai_service import (
 
 validate_auth_config(settings)
 
-# Initialize database tables for local/test environments
-Base.metadata.create_all(bind=engine)
+# Schema is owned by Alembic (`alembic upgrade head`); the app never creates tables itself.
 
 app = FastAPI(
     title=settings.project_name,
@@ -75,21 +84,13 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
-    allow_credentials=True,
+    allow_credentials=False,  # bearer tokens in headers, no cookies
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
 
-@app.middleware("http")
-async def enforce_request_size_limit(request: Request, call_next):
-    content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > settings.max_request_body_bytes:
-        return JSONResponse(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            content={"detail": "Request payload exceeds maximum allowed size."},
-        )
-    return await call_next(request)
+app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
 
 
 # ==============================================================================
@@ -201,8 +202,7 @@ def register_user(
     db: Session = Depends(get_db),
     auth_provider: SupabaseAuthProvider = Depends(get_auth_provider),
 ):
-    client_ip = request.client.host if request.client else "unknown"
-    check_rate_limit(f"auth:{client_ip}", max_per_minute=20)
+    check_rate_limit(db, f"auth:{client_ip(request)}", max_per_minute=20)
 
     try:
         session = auth_provider.sign_up(payload.email, payload.password, payload.display_name.strip())
@@ -228,11 +228,10 @@ def login_user(
     db: Session = Depends(get_db),
     auth_provider: SupabaseAuthProvider = Depends(get_auth_provider),
 ):
-    client_ip = request.client.host if request.client else "unknown"
-    check_rate_limit(f"auth:{client_ip}", max_per_minute=20)
+    check_rate_limit(db, f"auth:{client_ip(request)}", max_per_minute=20)
 
     cleaned_email = payload.email.strip().lower()
-    check_rate_limit(f"login:{cleaned_email}", max_per_minute=10)
+    check_rate_limit(db, f"login:{hash_email(cleaned_email)}", max_per_minute=10)
 
     try:
         session = auth_provider.sign_in(cleaned_email, payload.password)
@@ -245,10 +244,10 @@ def login_user(
 def recover_password(
     payload: AuthRecoverRequest,
     request: Request,
+    db: Session = Depends(get_db),
     auth_provider: SupabaseAuthProvider = Depends(get_auth_provider),
 ):
-    client_ip = request.client.host if request.client else "unknown"
-    check_rate_limit(f"reset:{client_ip}", max_per_minute=10)
+    check_rate_limit(db, f"reset:{client_ip(request)}", max_per_minute=10)
 
     try:
         auth_provider.request_password_reset(payload.email.strip().lower())
@@ -261,13 +260,13 @@ def recover_password(
 def confirm_password_recovery(
     payload: AuthRecoverConfirmRequest,
     request: Request,
+    db: Session = Depends(get_db),
     auth_provider: SupabaseAuthProvider = Depends(get_auth_provider),
 ):
-    client_ip = request.client.host if request.client else "unknown"
-    check_rate_limit(f"reset:{client_ip}", max_per_minute=10)
+    check_rate_limit(db, f"reset:{client_ip(request)}", max_per_minute=10)
 
     cleaned_email = payload.email.strip().lower()
-    check_rate_limit(f"recover:{cleaned_email}", max_per_minute=5)
+    check_rate_limit(db, f"recover:{hash_email(cleaned_email)}", max_per_minute=5)
 
     try:
         auth_provider.confirm_password_reset(cleaned_email, payload.code.strip(), payload.new_password)
@@ -280,10 +279,11 @@ def confirm_password_recovery(
 def logout_user(
     credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
     current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
     auth_provider: SupabaseAuthProvider = Depends(get_auth_provider),
 ):
     if credentials and credentials.credentials:
-        revoke_token(credentials.credentials)
+        revoke_token(db, credentials.credentials)
         try:
             auth_provider.sign_out(credentials.credentials)
         except AuthProviderError:
@@ -327,7 +327,7 @@ def delete_user_account(
     db.commit()
 
     if credentials and credentials.credentials:
-        revoke_token(credentials.credentials)
+        revoke_token(db, credentials.credentials)
 
     return {
         "deleted": True,
@@ -396,20 +396,33 @@ def update_my_profile(
 # ==============================================================================
 # PROGRESS & QUIZ SCORING (Transactional & Idempotent — prevents duplicate XP)
 # ==============================================================================
-@app.post(f"{settings.api_v1_str}/progress/quiz", response_model=QuizSubmissionResponse)
-def submit_quiz_attempt(
-    payload: QuizSubmissionRequest,
-    current_user: Profile = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    if payload.correct_count > payload.total_questions:
+def record_quiz_attempt(
+    db: Session,
+    user: Profile,
+    *,
+    lesson_id: str,
+    client_submission_id: str,
+    score_percent: int,
+    correct_count: int,
+    total_questions: int,
+    mistakes: list,
+) -> QuizSubmissionResponse:
+    """Validate and stage a quiz attempt. XP and pass mark come from the server catalog.
+
+    Does not commit; the caller owns the transaction.
+    """
+    rules = get_lesson_rules(lesson_id)
+    if rules is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown lesson_id.")
+
+    if total_questions <= 0 or correct_count < 0 or correct_count > total_questions:
         raise HTTPException(
             status_code=422,
-            detail="correct_count cannot exceed total_questions.",
+            detail="correct_count must be between 0 and total_questions.",
         )
 
-    expected_pct = round((payload.correct_count / payload.total_questions) * 100)
-    if abs(expected_pct - payload.score_percent) > 1:
+    expected_pct = round((correct_count / total_questions) * 100)
+    if abs(expected_pct - score_percent) > 1:
         raise HTTPException(
             status_code=422,
             detail="Inconsistent score_percent relative to correct_count and total_questions.",
@@ -418,11 +431,11 @@ def submit_quiz_attempt(
     # Check idempotency key first
     existing_attempt = (
         db.query(QuizAttempt)
-        .filter(QuizAttempt.client_submission_id == payload.client_submission_id)
+        .filter(QuizAttempt.client_submission_id == client_submission_id)
         .first()
     )
     if existing_attempt:
-        if existing_attempt.user_id != current_user.id:
+        if existing_attempt.user_id != user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Submission ID belongs to another user.",
@@ -431,32 +444,32 @@ def submit_quiz_attempt(
             lesson_id=existing_attempt.lesson_id,
             client_submission_id=existing_attempt.client_submission_id,
             score_percent=existing_attempt.score_percent,
-            passed=existing_attempt.score_percent >= payload.passing_score,
+            passed=existing_attempt.score_percent >= rules.passing_score,
             xp_earned=0,
-            total_xp=current_user.total_xp,
+            total_xp=user.total_xp,
             duplicate_submission=True,
         )
 
     progress = (
         db.query(LessonProgress)
         .filter(
-            LessonProgress.user_id == current_user.id,
-            LessonProgress.lesson_id == payload.lesson_id,
+            LessonProgress.user_id == user.id,
+            LessonProgress.lesson_id == lesson_id,
         )
         .first()
     )
 
-    passed = payload.score_percent >= payload.passing_score
+    passed = score_percent >= rules.passing_score
     already_awarded = bool(progress and progress.xp_awarded)
-    xp_earned = payload.xp_reward if (passed and not already_awarded) else 0
+    xp_earned = rules.xp_reward if (passed and not already_awarded) else 0
 
     now = datetime.now(timezone.utc)
     if not progress:
         progress = LessonProgress(
-            user_id=current_user.id,
-            lesson_id=payload.lesson_id,
+            user_id=user.id,
+            lesson_id=lesson_id,
             status="completed" if passed else "in_progress",
-            best_score=payload.score_percent,
+            best_score=score_percent,
             attempts_count=1,
             xp_awarded=bool(xp_earned > 0),
             completed_at=now if passed else None,
@@ -464,26 +477,57 @@ def submit_quiz_attempt(
         db.add(progress)
     else:
         progress.attempts_count += 1
-        progress.best_score = max(progress.best_score, payload.score_percent)
+        progress.best_score = max(progress.best_score, score_percent)
         if passed:
             progress.status = "completed"
             progress.completed_at = progress.completed_at or now
         if xp_earned > 0:
             progress.xp_awarded = True
 
-    attempt = QuizAttempt(
-        user_id=current_user.id,
+    db.add(
+        QuizAttempt(
+            user_id=user.id,
+            lesson_id=lesson_id,
+            client_submission_id=client_submission_id,
+            score_percent=score_percent,
+            correct_count=correct_count,
+            total_questions=total_questions,
+            xp_earned=xp_earned,
+            mistakes=mistakes,
+        )
+    )
+    user.total_xp += xp_earned
+    db.flush()
+
+    return QuizSubmissionResponse(
+        lesson_id=lesson_id,
+        client_submission_id=client_submission_id,
+        score_percent=score_percent,
+        passed=passed,
+        xp_earned=xp_earned,
+        total_xp=user.total_xp,
+        duplicate_submission=False,
+    )
+
+
+@app.post(f"{settings.api_v1_str}/progress/quiz", response_model=QuizSubmissionResponse)
+def submit_quiz_attempt(
+    payload: QuizSubmissionRequest,
+    current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    result = record_quiz_attempt(
+        db,
+        current_user,
         lesson_id=payload.lesson_id,
         client_submission_id=payload.client_submission_id,
         score_percent=payload.score_percent,
         correct_count=payload.correct_count,
         total_questions=payload.total_questions,
-        xp_earned=xp_earned,
         mistakes=payload.mistakes,
     )
-    db.add(attempt)
-
-    current_user.total_xp += xp_earned
+    if result.duplicate_submission:
+        return result
     try:
         db.commit()
     except IntegrityError:
@@ -492,17 +536,7 @@ def submit_quiz_attempt(
             status_code=status.HTTP_409_CONFLICT,
             detail="Concurrent duplicate quiz submission detected.",
         )
-
-    db.refresh(current_user)
-    return QuizSubmissionResponse(
-        lesson_id=payload.lesson_id,
-        client_submission_id=payload.client_submission_id,
-        score_percent=payload.score_percent,
-        passed=passed,
-        xp_earned=xp_earned,
-        total_xp=current_user.total_xp,
-        duplicate_submission=False,
-    )
+    return result
 
 
 # ==============================================================================
@@ -615,77 +649,179 @@ def upsert_vocabulary(
 # ==============================================================================
 # OFFLINE SYNC BATCH ENDPOINT
 # ==============================================================================
-@app.post(f"{settings.api_v1_str}/sync/batch")
+def _apply_vocabulary_card(db: Session, user: Profile, card: SyncVocabularyCard) -> None:
+    word = card.wordOrPhrase.strip()
+    row = (
+        db.query(UserVocabulary)
+        .filter(UserVocabulary.user_id == user.id, UserVocabulary.word_or_phrase == word)
+        .first()
+    )
+    if row is None:
+        row = UserVocabulary(user_id=user.id, word_or_phrase=word, review_history=[])
+        db.add(row)
+    row.meaning_bn = card.meaningBn
+    row.definition_en = card.definitionEn
+    row.example_sentence = card.exampleSentence
+    row.phonetic = card.phonetic
+    row.is_favorite = card.isFavorite
+    row.repetition_number = card.repetitionNumber
+    row.easiness_factor = card.easinessFactor
+    row.interval_days = card.intervalDays
+    row.next_review_at = card.nextReviewAt
+    row.last_reviewed_at = card.lastReviewedAt
+    db.flush()
+
+
+def _apply_sync_mutation(db: Session, user: Profile, mutation: SyncMutationItem) -> SyncItemResult:
+    already = (
+        db.query(SyncReceipt)
+        .filter(SyncReceipt.user_id == user.id, SyncReceipt.mutation_id == mutation.id)
+        .first()
+    )
+    if already:
+        return SyncItemResult(id=mutation.id, status="duplicate")
+
+    savepoint = db.begin_nested()
+    try:
+        item_status = "ok"
+        if mutation.type == "lesson_quiz_completed":
+            quiz = SyncQuizPayload.model_validate(mutation.payload)
+            result = record_quiz_attempt(
+                db,
+                user,
+                lesson_id=quiz.lessonId,
+                client_submission_id=quiz.clientSubmissionId,
+                score_percent=quiz.scorePercent,
+                correct_count=quiz.correctCount,
+                total_questions=quiz.totalQuestions,
+                mistakes=quiz.mistakes,
+            )
+            if result.duplicate_submission:
+                item_status = "duplicate"
+        elif mutation.type == "vocabulary_upserted":
+            _apply_vocabulary_card(db, user, SyncVocabularyPayload.model_validate(mutation.payload).card)
+        else:
+            raise ValueError(f"Unsupported mutation type: {mutation.type}")
+
+        db.add(SyncReceipt(user_id=user.id, mutation_id=mutation.id, mutation_type=mutation.type))
+        db.flush()
+        savepoint.commit()
+        return SyncItemResult(id=mutation.id, status=item_status)
+    except HTTPException as exc:
+        savepoint.rollback()
+        return SyncItemResult(id=mutation.id, status="error", detail=str(exc.detail))
+    except (ValidationError, ValueError, IntegrityError) as exc:
+        savepoint.rollback()
+        detail = exc.errors()[0]["msg"] if isinstance(exc, ValidationError) else str(exc).splitlines()[0]
+        return SyncItemResult(id=mutation.id, status="error", detail=detail[:200])
+
+
+@app.post(f"{settings.api_v1_str}/sync/batch", response_model=SyncBatchResponse)
 def sync_offline_mutations(
     payload: SyncBatchRequest,
-    current_user: Profile | None = Depends(get_optional_user),
+    current_user: Profile = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ):
-    return {
-        "synced": True,
-        "processed_count": len(payload.mutations),
-        "user_id": current_user.id if current_user else "guest",
-    }
+    """Apply queued offline mutations in one transaction (one savepoint per item).
+
+    The client must drop only items acknowledged "ok" or "duplicate" and keep the rest queued.
+    """
+    results = [_apply_sync_mutation(db, current_user, m) for m in payload.mutations]
+    db.commit()
+    return SyncBatchResponse(results=results)
 
 
 # ==============================================================================
 # AI ENGLISH TUTOR, GRAMMAR CHECKER & IELTS EVALUATOR
 # ==============================================================================
-def _check_and_increment_ai_quota(user: Profile | None, db: Session) -> None:
-    if not user:
-        return
-    today = datetime.now(timezone.utc).date()
-    if user.ai_quota_date != today:
-        user.ai_quota_date = today
-        user.ai_requests_today = 0
+def reserve_ai_quota(db: Session, user: Profile, limit: int) -> bool:
+    """Atomically take one AI request from today's quota. Returns False when the quota is used up.
 
+    A single conditional UPDATE, so concurrent requests can't both pass a stale read and overshoot.
+    """
+    today = datetime.now(timezone.utc).date()
+    stmt = (
+        update(Profile)
+        .where(Profile.id == user.id)
+        .where(
+            or_(
+                Profile.ai_quota_date.is_(None),
+                Profile.ai_quota_date != today,
+                Profile.ai_requests_today < limit,
+            )
+        )
+        .values(
+            ai_requests_today=case((Profile.ai_quota_date == today, Profile.ai_requests_today + 1), else_=1),
+            ai_quota_date=today,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    granted = db.execute(stmt).rowcount == 1
+    db.commit()
+    return granted
+
+
+def _release_ai_quota(db: Session, user: Profile) -> None:
+    """Give back a reserved request when the deterministic fallback answered instead of the live model."""
+    today = datetime.now(timezone.utc).date()
+    db.execute(
+        update(Profile)
+        .where(Profile.id == user.id, Profile.ai_quota_date == today, Profile.ai_requests_today > 0)
+        .values(ai_requests_today=Profile.ai_requests_today - 1)
+        .execution_options(synchronize_session=False)
+    )
+
+
+def _require_ai_quota(db: Session, user: Profile) -> None:
     limit = (
         settings.ai_max_daily_requests_premium
         if user.subscription_tier == "premium"
         else settings.ai_max_daily_requests_free
     )
-    if user.ai_requests_today >= limit:
+    if not reserve_ai_quota(db, user, limit):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Daily AI practice limit ({limit} requests) reached for your tier.",
         )
-    user.ai_requests_today += 1
-    db.commit()
 
 
 @app.post(f"{settings.api_v1_str}/ai/tutor", response_model=AITutorResponse)
 async def ai_tutor_endpoint(
     payload: AITutorRequest,
-    current_user: Profile | None = Depends(get_optional_user),
+    current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _check_and_increment_ai_quota(current_user, db)
+    _require_ai_quota(db, current_user)
     feedback = await generate_tutor_feedback(payload)
+    if feedback.providerStatus != "live_ai":
+        _release_ai_quota(db, current_user)
 
-    if current_user:
-        session_record = SpeakingSession(
+    db.add(
+        SpeakingSession(
             user_id=current_user.id,
             scenario_id=payload.scenarioId,
             mode="ai_tutor",
             user_transcript=payload.userMessage,
             structured_feedback=feedback.model_dump(),
         )
-        db.add(session_record)
-        db.commit()
-
+    )
+    db.commit()
     return feedback
 
 
 @app.post(f"{settings.api_v1_str}/ai/grammar-check", response_model=GrammarCheckResponse)
 async def ai_grammar_endpoint(
     payload: GrammarCheckRequest,
-    current_user: Profile | None = Depends(get_optional_user),
+    current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _check_and_increment_ai_quota(current_user, db)
+    _require_ai_quota(db, current_user)
     result = await generate_grammar_check(payload)
+    if result.providerStatus != "live_ai":
+        _release_ai_quota(db, current_user)
 
-    if current_user:
-        record = GrammarCheck(
+    db.add(
+        GrammarCheck(
             user_id=current_user.id,
             original_text=result.originalText,
             corrected_text=result.correctedText,
@@ -693,23 +829,24 @@ async def ai_grammar_endpoint(
             explanations=[e.model_dump() for e in result.explanations],
             practice_exercise=result.practiceExercise.model_dump(),
         )
-        db.add(record)
-        db.commit()
-
+    )
+    db.commit()
     return result
 
 
 @app.post(f"{settings.api_v1_str}/ai/ielts-evaluate", response_model=IELTSEvaluateResponse)
 async def ai_ielts_endpoint(
     payload: IELTSEvaluateRequest,
-    current_user: Profile | None = Depends(get_optional_user),
+    current_user: Profile = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _check_and_increment_ai_quota(current_user, db)
+    _require_ai_quota(db, current_user)
     evaluation = await generate_ielts_evaluation(payload)
+    if evaluation.providerStatus != "live_ai":
+        _release_ai_quota(db, current_user)
 
-    if current_user:
-        attempt = IELTSAttempt(
+    db.add(
+        IELTSAttempt(
             user_id=current_user.id,
             module_type=payload.moduleType,
             task_id=payload.taskId,
@@ -718,7 +855,6 @@ async def ai_ielts_endpoint(
             estimated_band=evaluation.estimatedBand,
             is_unofficial_estimate=True,
         )
-        db.add(attempt)
-        db.commit()
-
+    )
+    db.commit()
     return evaluation

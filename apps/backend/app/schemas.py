@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
@@ -70,14 +71,8 @@ class QuizSubmissionRequest(BaseModel):
     score_percent: int = Field(..., ge=0, le=100)
     correct_count: int = Field(..., ge=0)
     total_questions: int = Field(..., gt=0)
-    xp_reward: int = Field(default=25, ge=0, le=200)
-    passing_score: int = Field(default=70, ge=50, le=100)
+    # XP and pass mark are looked up server-side from app/data/lessons.json; never sent by the client.
     mistakes: List[Dict[str, Any]] = Field(default_factory=list)
-
-    @field_validator("correct_count")
-    @classmethod
-    def check_correct_le_total(cls, v: int, info) -> int:  # type: ignore
-        return v
 
 
 class QuizSubmissionResponse(BaseModel):
@@ -200,18 +195,58 @@ class IELTSEvaluateResponse(BaseModel):
     improvementsEn: List[str]
     improvementsBn: List[str]
     improvedSampleResponse: str
+    providerStatus: Literal["live_ai", "offline_fallback"] = "offline_fallback"
 
 
 class SyncMutationItem(BaseModel):
-    id: str
-    type: str
+    id: str = Field(..., min_length=1, max_length=160)
+    type: str = Field(..., max_length=48)
     payload: Dict[str, Any]
     createdAt: str
     retryCount: int = 0
 
 
 class SyncBatchRequest(BaseModel):
-    mutations: List[SyncMutationItem]
+    mutations: List[SyncMutationItem] = Field(..., max_length=200)
+
+
+class SyncQuizPayload(BaseModel):
+    """Client-claimed XP is ignored; only the raw score is used."""
+
+    lessonId: str = Field(..., min_length=1, max_length=64)
+    clientSubmissionId: str = Field(..., min_length=4, max_length=128)
+    scorePercent: int = Field(..., ge=0, le=100)
+    correctCount: int = Field(..., ge=0)
+    totalQuestions: int = Field(..., gt=0)
+    mistakes: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class SyncVocabularyCard(BaseModel):
+    wordOrPhrase: str = Field(..., min_length=1, max_length=160)
+    meaningBn: str = Field(default="", max_length=255)
+    definitionEn: str = Field(..., min_length=1, max_length=1000)
+    exampleSentence: str = Field(default="", max_length=1000)
+    phonetic: str = Field(default="", max_length=100)
+    isFavorite: bool = False
+    repetitionNumber: int = Field(default=0, ge=0)
+    easinessFactor: float = Field(default=2.5, ge=1.3, le=5.0)
+    intervalDays: int = Field(default=0, ge=0, le=3650)
+    nextReviewAt: datetime
+    lastReviewedAt: Optional[datetime] = None
+
+
+class SyncVocabularyPayload(BaseModel):
+    card: SyncVocabularyCard
+
+
+class SyncItemResult(BaseModel):
+    id: str
+    status: Literal["ok", "duplicate", "error"]
+    detail: Optional[str] = None
+
+
+class SyncBatchResponse(BaseModel):
+    results: List[SyncItemResult]
 
 
 class AccountDeletionRequestModel(BaseModel):

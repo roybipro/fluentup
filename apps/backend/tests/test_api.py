@@ -1,6 +1,7 @@
-from app.models import AccountDeletionRequest, LessonProgress, Profile, QuizAttempt, UserVocabulary
+import pytest
 
-from conftest import TestingSessionLocal, client
+from app.models import AccountDeletionRequest, LessonProgress, Profile, QuizAttempt, UserVocabulary
+from tests.support import TestingSessionLocal, client
 
 
 def test_1_health_check_endpoint():
@@ -174,9 +175,11 @@ def test_5_api_validation_rejects_inconsistent_quiz_scores_and_empty_grammar():
 
 
 def test_6_ai_provider_failure_handling_and_unofficial_ielts_disclaimers():
+    headers = _register("ai6@example.com")
     # Without a live GEMINI_API_KEY, the endpoints must gracefully return validated fallback schemas
     tutor_res = client.post(
         "/api/v1/ai/tutor",
+        headers=headers,
         json={
             "scenarioId": "scen-interview",
             "scenarioTitle": "Job Interview",
@@ -191,6 +194,7 @@ def test_6_ai_provider_failure_handling_and_unofficial_ielts_disclaimers():
 
     ielts_res = client.post(
         "/api/v1/ai/ielts-evaluate",
+        headers=headers,
         json={
             "moduleType": "writing",
             "taskId": "ielts-wrt-t2",
@@ -271,3 +275,231 @@ def test_8_account_deletion_cascades_all_personal_records_and_revokes_token():
         assert "delete_me@example.com" not in audit.email_hash
     finally:
         db.close()
+
+
+def _register(email: str) -> dict:
+    res = client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": "Password123!", "display_name": "T"},
+    )
+    assert res.status_code == 201
+    return {"Authorization": f"Bearer {res.json()['access_token']}"}
+
+
+def test_client_cannot_set_xp_reward_or_passing_score():
+    headers = _register("xpcheat@example.com")
+    # lesson-beg-1 is worth 25 XP with a 70% pass mark on the server.
+    cheat = client.post(
+        "/api/v1/progress/quiz",
+        headers=headers,
+        json={
+            "lesson_id": "lesson-beg-1",
+            "client_submission_id": "sub-cheat-1",
+            "score_percent": 60,
+            "correct_count": 3,
+            "total_questions": 5,
+            "xp_reward": 200,
+            "passing_score": 50,
+        },
+    )
+    assert cheat.status_code == 200
+    assert cheat.json()["passed"] is False
+    assert cheat.json()["xp_earned"] == 0
+
+    honest = client.post(
+        "/api/v1/progress/quiz",
+        headers=headers,
+        json={
+            "lesson_id": "lesson-beg-1",
+            "client_submission_id": "sub-cheat-2",
+            "score_percent": 100,
+            "correct_count": 5,
+            "total_questions": 5,
+            "xp_reward": 200,
+        },
+    )
+    assert honest.json()["xp_earned"] == 25
+
+
+def test_unknown_lesson_returns_404():
+    headers = _register("nolesson@example.com")
+    res = client.post(
+        "/api/v1/progress/quiz",
+        headers=headers,
+        json={
+            "lesson_id": "lesson-does-not-exist",
+            "client_submission_id": "sub-404",
+            "score_percent": 100,
+            "correct_count": 5,
+            "total_questions": 5,
+        },
+    )
+    assert res.status_code == 404
+
+
+def _quiz_mutation(mid: str, sub_id: str, lesson_id: str = "lesson-beg-1") -> dict:
+    return {
+        "id": mid,
+        "type": "lesson_quiz_completed",
+        "payload": {
+            "lessonId": lesson_id,
+            "clientSubmissionId": sub_id,
+            "scorePercent": 100,
+            "correctCount": 5,
+            "totalQuestions": 5,
+            "xpEarned": 999,
+        },
+        "createdAt": "2026-11-20T10:00:00Z",
+        "retryCount": 0,
+    }
+
+
+def _vocab_mutation(mid: str, word: str) -> dict:
+    return {
+        "id": mid,
+        "type": "vocabulary_upserted",
+        "payload": {
+            "card": {
+                "id": f"vocab-{word}",
+                "wordOrPhrase": word,
+                "meaningBn": "",
+                "definitionEn": f"Definition of {word}",
+                "exampleSentence": "",
+                "phonetic": "/x/",
+                "isFavorite": True,
+                "repetitionNumber": 2,
+                "easinessFactor": 2.6,
+                "intervalDays": 3,
+                "nextReviewAt": "2026-11-23T10:00:00Z",
+                "lastReviewedAt": "2026-11-20T10:00:00Z",
+                "reviewHistory": [],
+            }
+        },
+        "createdAt": "2026-11-20T10:00:00Z",
+        "retryCount": 0,
+    }
+
+
+def test_sync_batch_persists_items_and_is_idempotent():
+    headers = _register("sync@example.com")
+    batch = {"mutations": [_quiz_mutation("m-1", "sub-sync-1"), _vocab_mutation("m-2", "diligent")]}
+
+    first = client.post("/api/v1/sync/batch", headers=headers, json=batch)
+    assert first.status_code == 200
+    assert [r["status"] for r in first.json()["results"]] == ["ok", "ok"]
+
+    second = client.post("/api/v1/sync/batch", headers=headers, json=batch)
+    assert second.status_code == 200
+    assert [r["status"] for r in second.json()["results"]] == ["duplicate", "duplicate"]
+
+    db = TestingSessionLocal()
+    try:
+        assert db.query(QuizAttempt).filter(QuizAttempt.client_submission_id == "sub-sync-1").count() == 1
+        vocab = db.query(UserVocabulary).filter(UserVocabulary.word_or_phrase == "diligent").all()
+        assert len(vocab) == 1
+        assert vocab[0].interval_days == 3 and vocab[0].is_favorite is True
+        # Client-claimed xpEarned (999) is ignored; lesson-beg-1 is worth 25.
+        assert db.query(Profile).filter(Profile.email == "sync@example.com").one().total_xp == 25
+    finally:
+        db.close()
+
+
+def test_sync_batch_partial_failure_reports_per_item_status():
+    headers = _register("syncpartial@example.com")
+    batch = {
+        "mutations": [
+            _quiz_mutation("p-1", "sub-partial-1"),
+            _quiz_mutation("p-2", "sub-partial-2", lesson_id="lesson-missing"),
+            _vocab_mutation("p-3", "tenacious"),
+            {"id": "p-4", "type": "not_a_real_type", "payload": {}, "createdAt": "x", "retryCount": 0},
+        ]
+    }
+    res = client.post("/api/v1/sync/batch", headers=headers, json=batch)
+    assert res.status_code == 200
+    assert [r["status"] for r in res.json()["results"]] == ["ok", "error", "ok", "error"]
+
+    db = TestingSessionLocal()
+    try:
+        assert db.query(QuizAttempt).filter(QuizAttempt.client_submission_id == "sub-partial-1").count() == 1
+        assert db.query(QuizAttempt).filter(QuizAttempt.client_submission_id == "sub-partial-2").count() == 0
+        assert db.query(UserVocabulary).filter(UserVocabulary.word_or_phrase == "tenacious").count() == 1
+    finally:
+        db.close()
+
+    # A failed item is retried later and succeeds once fixed (no receipt was stored for it).
+    retry = client.post("/api/v1/sync/batch", headers=headers, json={"mutations": [_quiz_mutation("p-2", "sub-partial-2")]})
+    assert retry.json()["results"][0]["status"] == "ok"
+
+
+def test_sync_batch_requires_auth():
+    res = client.post("/api/v1/sync/batch", json={"mutations": []})
+    assert res.status_code == 401
+
+
+_TUTOR_BODY = {
+    "scenarioId": "scen-interview",
+    "scenarioTitle": "Job Interview",
+    "userMessage": "I am working here since 3 years.",
+    "explanationLanguage": "en",
+}
+
+
+@pytest.mark.parametrize("path,body", [
+    ("/api/v1/ai/tutor", _TUTOR_BODY),
+    ("/api/v1/ai/grammar-check", {"text": "He go to school.", "explanationLanguage": "en"}),
+    ("/api/v1/ai/ielts-evaluate", {"moduleType": "writing", "taskId": "t", "userResponse": "Some text."}),
+])
+def test_ai_endpoints_reject_missing_and_invalid_tokens(path, body):
+    assert client.post(path, json=body).status_code == 401
+    garbage = client.post(path, json=body, headers={"Authorization": "Bearer not-a-real-token"})
+    assert garbage.status_code == 401
+
+
+def test_offline_fallback_does_not_use_ai_quota():
+    headers = _register("fallbackquota@example.com")
+    res = client.post("/api/v1/ai/tutor", headers=headers, json=_TUTOR_BODY)
+    assert res.status_code == 200
+    assert res.json()["providerStatus"] == "offline_fallback"
+    db = TestingSessionLocal()
+    try:
+        assert db.query(Profile).filter(Profile.email == "fallbackquota@example.com").one().ai_requests_today == 0
+    finally:
+        db.close()
+
+
+def test_ai_quota_reservation_is_atomic_across_stale_sessions():
+    from app.main import reserve_ai_quota
+
+    _register("quota@example.com")
+    limit = 3
+    sessions = [TestingSessionLocal() for _ in range(limit + 1)]
+    try:
+        # Every session loads the profile before anyone reserves, like concurrent requests would.
+        users = [s.query(Profile).filter(Profile.email == "quota@example.com").one() for s in sessions]
+        granted = [reserve_ai_quota(s, u, limit) for s, u in zip(sessions, users)]
+        assert granted.count(True) == limit
+        assert granted.count(False) == 1
+    finally:
+        for s in sessions:
+            s.close()
+
+
+def test_non_numeric_content_length_is_400_not_500():
+    res = client.post(
+        "/api/v1/auth/login",
+        content=b'{"email":"a@b.co","password":"Password123!"}',
+        headers={"Content-Type": "application/json", "Content-Length": "abc"},
+    )
+    assert res.status_code == 400
+
+
+def test_oversized_chunked_body_is_rejected():
+    from app.config import settings
+
+    def chunks():
+        piece = b" " * 65536
+        for _ in range(settings.max_request_body_bytes // len(piece) + 2):
+            yield piece
+
+    res = client.post("/api/v1/auth/login", content=chunks(), headers={"Content-Type": "application/json"})
+    assert res.status_code == 413

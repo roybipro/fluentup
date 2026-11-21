@@ -10,7 +10,8 @@
     "mobile:typecheck": "npm --prefix apps/mobile run typecheck",
     "mobile:lint": "npm --prefix apps/mobile run lint",
     "backend:test": "cd apps/backend && .venv/bin/pytest -v",
-    "backend:dev": "cd apps/backend && .venv/bin/uvicorn app.main:app --reload --port 8000",
+    "backend:migrate": "cd apps/backend && .venv/bin/alembic upgrade head",
+    "backend:dev": "npm run backend:migrate && cd apps/backend && .venv/bin/uvicorn app.main:app --reload --port 8000",
     "test": "npm run mobile:test && npm run backend:test",
     "typecheck": "npm run mobile:typecheck"
   },

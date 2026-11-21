@@ -112,11 +112,13 @@ def deterministic_grammar_check(req: GrammarCheckRequest) -> GrammarCheckRespons
             )
         )
 
-    natural = (
-        f"From my perspective, {corrected[0].lower() + corrected[1:]}"
-        if len(corrected) < 65
-        else corrected
-    )
+    natural = corrected
+    if len(corrected) < 65 and not corrected.rstrip().endswith("?"):
+        # Keep the pronoun "I" (and I'm, I've...) capitalised when it moves mid-sentence.
+        first_word = corrected.split(" ", 1)[0]
+        keep_case = first_word == "I" or first_word.startswith("I'")
+        lead = corrected if keep_case else corrected[0].lower() + corrected[1:]
+        natural = f"From my perspective, {lead}"
 
     return GrammarCheckResponse(
         originalText=original,
@@ -149,8 +151,10 @@ async def call_gemini_json(system_instruction: str, user_prompt: str) -> Dict[st
 
     url = (
         f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{settings.gemini_model}:generateContent?key={api_key}"
+        f"{settings.gemini_model}:generateContent"
     )
+    # Key goes in a header so it never appears in URLs, proxy logs or error messages.
+    headers = {"x-goog-api-key": api_key}
     payload = {
         "systemInstruction": {"parts": [{"text": system_instruction}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
@@ -161,7 +165,7 @@ async def call_gemini_json(system_instruction: str, user_prompt: str) -> Dict[st
     }
 
     async with httpx.AsyncClient(timeout=settings.ai_request_timeout_seconds) as client:
-        resp = await client.post(url, json=payload)
+        resp = await client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         body = resp.json()
         text = body["candidates"][0]["content"]["parts"][0]["text"]
@@ -251,6 +255,7 @@ async def generate_ielts_evaluation(req: IELTSEvaluateRequest) -> IELTSEvaluateR
         )
         raw["isUnofficialEstimate"] = True
         raw["disclaimer"] = disclaimer_text
+        raw["providerStatus"] = "live_ai"
         return IELTSEvaluateResponse.model_validate(raw)
     except Exception:
         words = len(req.userResponse.strip().split())

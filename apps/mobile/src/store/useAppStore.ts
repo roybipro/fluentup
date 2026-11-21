@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
 import {
   ExplanationLanguage,
   GrammarCheckResult,
@@ -17,6 +18,44 @@ import {
 } from '../services/learningEngine';
 
 export const STORAGE_KEY = 'fluentup.app.state.v1';
+/** The access token lives only in the OS keychain/keystore, never in the AsyncStorage blob. */
+export const AUTH_TOKEN_KEY = 'fluentup.auth.accessToken';
+/** Server caps a sync batch at 200 mutations and the body at 256 KB; stay well under both. */
+export const SYNC_BATCH_SIZE = 50;
+
+/** Returns false when the keychain write failed, so callers don't drop the only other copy. */
+async function writeAuthToken(token: string | null): Promise<boolean> {
+  try {
+    if (token) {
+      await SecureStore.setItemAsync(AUTH_TOKEN_KEY, token);
+    } else {
+      await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY);
+    }
+    return true;
+  } catch (error) {
+    if (__DEV__) console.warn('[auth] secure token write failed', error);
+    return false;
+  }
+}
+
+/** The plaintext token an older build left in the AsyncStorage blob, if any. */
+async function readLegacyBlobToken(): Promise<string> {
+  try {
+    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw)?.authSession?.accessToken ?? '') : '';
+  } catch {
+    return '';
+  }
+}
+
+async function readAuthToken(): Promise<string | null> {
+  try {
+    return await SecureStore.getItemAsync(AUTH_TOKEN_KEY);
+  } catch (error) {
+    if (__DEV__) console.warn('[auth] secure token read failed', error);
+    return null;
+  }
+}
 
 export interface LessonProgressRecord {
   lessonId: string;
@@ -49,6 +88,9 @@ export interface SyncQueueMutation {
   createdAt: string;
   retryCount: number;
 }
+
+/** Resolves to the ids of mutations the server acknowledged ("ok" or "duplicate"). */
+export type SyncExecutor = (mutations: SyncQueueMutation[]) => Promise<string[]>;
 
 export interface AuthSession {
   userId: string;
@@ -103,7 +145,14 @@ export interface AppState {
   completeOnboarding: (prefs: OnboardingPreferences) => void;
   signInUser: (session: AuthSession) => void;
   continueAsGuest: () => void;
-  logoutUser: () => Promise<void>;
+  /**
+   * Tries to sync first. If items are still unsynced it does NOT log out unless
+   * `discardUnsynced` is set, so the UI can warn the user before work is lost.
+   */
+  logoutUser: (options?: { syncExecutor?: SyncExecutor; discardUnsynced?: boolean }) => Promise<{
+    loggedOut: boolean;
+    unsyncedCount: number;
+  }>;
   deleteAccountAndPurgeData: () => Promise<void>;
 
   // Learning Actions
@@ -126,7 +175,11 @@ export interface AppState {
   recordIELTSAttempt: (evalResult: IELTSEvaluation, userResponse: string) => void;
 
   // Sync Actions
-  flushSyncQueue: (syncExecutor?: (mutations: SyncQueueMutation[]) => Promise<boolean>) => Promise<boolean>;
+  /**
+   * Sends the queue with `syncExecutor`, which resolves to the ids the server acknowledged.
+   * Only acknowledged items leave the queue. Resolves true when every sent item was acknowledged.
+   */
+  flushSyncQueue: (syncExecutor: SyncExecutor) => Promise<boolean>;
 }
 
 const DEFAULT_PREFERENCES: OnboardingPreferences = {
@@ -175,8 +228,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         const parsed = JSON.parse(raw);
         // Check session expiration if authenticated
         let validSession: AuthSession | null = parsed.authSession ?? null;
-        if (validSession && !validSession.isGuest && validSession.expiresAt < Date.now()) {
-          validSession = null;
+        const legacyToken = validSession?.accessToken || '';
+        if (validSession && !validSession.isGuest) {
+          if (legacyToken) {
+            // One-time migration: older builds stored the token in plaintext AsyncStorage.
+            await writeAuthToken(legacyToken);
+          }
+          const token = (await readAuthToken()) ?? legacyToken;
+          validSession = token && validSession.expiresAt >= Date.now() ? { ...validSession, accessToken: token } : null;
         }
         set({
           themeMode: parsed.themeMode ?? 'light',
@@ -199,19 +258,33 @@ export const useAppStore = create<AppState>((set, get) => ({
           lastSyncedAt: parsed.lastSyncedAt ?? null,
           isHydrated: true,
         });
+        if (legacyToken) {
+          await get().persistToStorage();
+        }
       } else {
         set({ isHydrated: true });
       }
-    } catch {
+    } catch (error) {
+      if (__DEV__) console.warn('[storage] hydrate failed, starting from defaults', error);
       set({ isHydrated: true });
     }
   },
 
   persistToStorage: async () => {
     const state = get();
+    const session = state.authSession;
+    const signedIn = Boolean(session && !session.isGuest && session.accessToken);
+    const tokenSaved = await writeAuthToken(signedIn ? session!.accessToken : null);
+    // If the keychain write failed, never write a new plaintext copy. But keep an older build's copy
+    // of this same token until the keychain has it, or the user is signed out on the next launch.
+    let blobToken = '';
+    if (!tokenSaved && signedIn) {
+      const legacy = await readLegacyBlobToken();
+      if (legacy === session!.accessToken) blobToken = legacy;
+    }
     const serializable = {
       themeMode: state.themeMode,
-      authSession: state.authSession,
+      authSession: session ? { ...session, accessToken: blobToken } : null,
       hasCompletedOnboarding: state.hasCompletedOnboarding,
       preferences: state.preferences,
       totalXp: state.totalXp,
@@ -231,8 +304,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     };
     try {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
-    } catch {
-      // Ignore storage quota errors in fallback
+    } catch (error) {
+      if (__DEV__) console.warn('[storage] persist failed', error);
     }
   },
 
@@ -311,17 +384,27 @@ export const useAppStore = create<AppState>((set, get) => ({
     void get().persistToStorage();
   },
 
-  logoutUser: async () => {
+  logoutUser: async (options = {}) => {
+    const { syncExecutor, discardUnsynced = false } = options;
+    if (get().syncQueue.length > 0 && syncExecutor) {
+      await get().flushSyncQueue(syncExecutor);
+    }
+    const unsyncedCount = get().syncQueue.length;
+    if (unsyncedCount > 0 && !discardUnsynced) {
+      return { loggedOut: false, unsyncedCount };
+    }
     set({
       authSession: null,
       syncQueue: [],
       syncStatus: 'idle',
     });
     await get().persistToStorage();
+    return { loggedOut: true, unsyncedCount };
   },
 
   deleteAccountAndPurgeData: async () => {
     await AsyncStorage.removeItem(STORAGE_KEY);
+    await writeAuthToken(null);
     set({
       authSession: null,
       hasCompletedOnboarding: false,
@@ -598,36 +681,50 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ syncStatus: 'offline_queued' });
       return false;
     }
+    if (!state.authSession || state.authSession.isGuest) {
+      // Guests have no server account; keep the queue on device until they sign in.
+      set({ syncStatus: state.syncQueue.length > 0 ? 'offline_queued' : 'idle' });
+      return false;
+    }
     if (state.syncQueue.length === 0) {
       set({ syncStatus: 'synced', lastSyncedAt: new Date().toISOString() });
       return true;
     }
 
+    const snapshot = state.syncQueue;
+    const sentIds = new Set<string>();
+    const acked = new Set<string>();
+    const bumpUnacked = (queue: SyncQueueMutation[]) =>
+      queue
+        .filter((m) => !acked.has(m.id))
+        .map((m) => (sentIds.has(m.id) ? { ...m, retryCount: m.retryCount + 1 } : m));
+
     set({ syncStatus: 'syncing' });
-    try {
-      const ok = syncExecutor ? await syncExecutor(state.syncQueue) : true;
-      if (ok) {
-        const nowIso = new Date().toISOString();
-        set({
-          syncQueue: [],
-          syncStatus: 'synced',
-          lastSyncedAt: nowIso,
-        });
+    // Send bounded batches: one oversized request would be rejected forever and block the whole queue.
+    for (let start = 0; start < snapshot.length; start += SYNC_BATCH_SIZE) {
+      const batch = snapshot.slice(start, start + SYNC_BATCH_SIZE);
+      batch.forEach((m) => sentIds.add(m.id));
+      try {
+        (await syncExecutor(batch)).forEach((id) => acked.add(id));
+      } catch (error) {
+        if (__DEV__) {
+          console.warn('[sync] batch failed', error);
+        }
+        // Batches already acknowledged stay removed; this one and the unsent rest stay queued.
+        set((prev) => ({ syncStatus: 'error', syncQueue: bumpUnacked(prev.syncQueue) }));
         await get().persistToStorage();
-        return true;
+        return false;
       }
-      set({ syncStatus: 'error' });
-      return false;
-    } catch {
-      set((prev) => ({
-        syncStatus: 'error',
-        syncQueue: prev.syncQueue.map((item) => ({
-          ...item,
-          retryCount: item.retryCount + 1,
-        })),
-      }));
-      await get().persistToStorage();
-      return false;
     }
+
+    const allAcked = snapshot.every((m) => acked.has(m.id));
+    set((prev) => ({
+      // Items enqueued while the request was in flight are kept untouched.
+      syncQueue: bumpUnacked(prev.syncQueue),
+      syncStatus: allAcked ? 'synced' : 'error',
+      lastSyncedAt: allAcked ? new Date().toISOString() : prev.lastSyncedAt,
+    }));
+    await get().persistToStorage();
+    return allAcked;
   },
 }));

@@ -1,10 +1,11 @@
 import os
-from typing import List
-from pydantic import BaseModel
+from typing import List, Optional
+from pydantic import BaseModel, model_validator
 
 # Environments allowed to start without Supabase. Anything else is treated as production.
 LOCAL_ENVIRONMENTS = {"development", "test"}
 MIN_JWT_SECRET_LENGTH = 32
+_DEV_CORS_ORIGINS = ("http://localhost:8081", "http://localhost:19006")
 
 # Published in this repository's history or templates, so they can never protect real accounts.
 PUBLIC_JWT_SECRETS = {
@@ -43,6 +44,16 @@ class Settings(BaseModel):
     # Security & Operational Safeguards
     rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
     max_request_body_bytes: int = int(os.getenv("MAX_REQUEST_BODY_BYTES", "262144"))
+    # Number of trusted reverse proxies in front of the API (e.g. 1 behind Cloud Run's front end).
+    # 0 means X-Forwarded-For is ignored, so clients can't spoof their IP to dodge rate limits.
+    trusted_proxy_hops: int = int(os.getenv("TRUSTED_PROXY_HOPS", "0"))
+    cors_allowed_origins_raw: Optional[str] = os.getenv("CORS_ALLOWED_ORIGINS")
+
+    @model_validator(mode="after")
+    def _reject_wildcard_cors(self) -> "Settings":
+        if self.cors_allowed_origins_raw and "*" in self.cors_allowed_origins_raw:
+            raise ValueError("CORS_ALLOWED_ORIGINS must list explicit origins; '*' is not allowed.")
+        return self
 
     @property
     def supabase_issuer(self) -> str:
@@ -62,11 +73,13 @@ class Settings(BaseModel):
 
     @property
     def cors_origins(self) -> List[str]:
-        raw = os.getenv(
-            "CORS_ALLOWED_ORIGINS",
-            "http://localhost:8081,http://localhost:19006,https://fluentup.example.com",
-        )
-        return [o.strip() for o in raw.split(",") if o.strip()]
+        """Browser origins allowed to call the API. The native app doesn't need CORS at all.
+
+        No defaults outside development/test: production must list its web origins explicitly.
+        """
+        if self.cors_allowed_origins_raw is None:
+            return list(_DEV_CORS_ORIGINS) if self.environment in LOCAL_ENVIRONMENTS else []
+        return [o.strip() for o in self.cors_allowed_origins_raw.split(",") if o.strip()]
 
 
 def validate_auth_config(config: Settings) -> None:
