@@ -23,15 +23,28 @@ export const AUTH_TOKEN_KEY = 'fluentup.auth.accessToken';
 /** Server caps a sync batch at 200 mutations and the body at 256 KB; stay well under both. */
 export const SYNC_BATCH_SIZE = 50;
 
-async function writeAuthToken(token: string | null): Promise<void> {
+/** Returns false when the keychain write failed, so callers don't drop the only other copy. */
+async function writeAuthToken(token: string | null): Promise<boolean> {
   try {
     if (token) {
       await SecureStore.setItemAsync(AUTH_TOKEN_KEY, token);
     } else {
       await SecureStore.deleteItemAsync(AUTH_TOKEN_KEY);
     }
+    return true;
   } catch (error) {
     if (__DEV__) console.warn('[auth] secure token write failed', error);
+    return false;
+  }
+}
+
+/** The plaintext token an older build left in the AsyncStorage blob, if any. */
+async function readLegacyBlobToken(): Promise<string> {
+  try {
+    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw)?.authSession?.accessToken ?? '') : '';
+  } catch {
+    return '';
   }
 }
 
@@ -260,10 +273,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   persistToStorage: async () => {
     const state = get();
     const session = state.authSession;
-    await writeAuthToken(session && !session.isGuest ? session.accessToken || null : null);
+    const signedIn = Boolean(session && !session.isGuest && session.accessToken);
+    const tokenSaved = await writeAuthToken(signedIn ? session!.accessToken : null);
+    // If the keychain write failed, never write a new plaintext copy. But keep an older build's copy
+    // of this same token until the keychain has it, or the user is signed out on the next launch.
+    let blobToken = '';
+    if (!tokenSaved && signedIn) {
+      const legacy = await readLegacyBlobToken();
+      if (legacy === session!.accessToken) blobToken = legacy;
+    }
     const serializable = {
       themeMode: state.themeMode,
-      authSession: session ? { ...session, accessToken: '' } : null,
+      authSession: session ? { ...session, accessToken: blobToken } : null,
       hasCompletedOnboarding: state.hasCompletedOnboarding,
       preferences: state.preferences,
       totalXp: state.totalXp,
