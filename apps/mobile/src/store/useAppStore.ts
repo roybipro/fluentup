@@ -20,6 +20,8 @@ import {
 export const STORAGE_KEY = 'fluentup.app.state.v1';
 /** The access token lives only in the OS keychain/keystore, never in the AsyncStorage blob. */
 export const AUTH_TOKEN_KEY = 'fluentup.auth.accessToken';
+/** Server caps a sync batch at 200 mutations and the body at 256 KB; stay well under both. */
+export const SYNC_BATCH_SIZE = 50;
 
 async function writeAuthToken(token: string | null): Promise<void> {
   try {
@@ -668,30 +670,36 @@ export const useAppStore = create<AppState>((set, get) => ({
       return true;
     }
 
-    const batch = state.syncQueue;
-    const sentIds = new Set(batch.map((m) => m.id));
-    const bumpUnacked = (queue: SyncQueueMutation[], acked: Set<string>) =>
+    const snapshot = state.syncQueue;
+    const sentIds = new Set<string>();
+    const acked = new Set<string>();
+    const bumpUnacked = (queue: SyncQueueMutation[]) =>
       queue
         .filter((m) => !acked.has(m.id))
         .map((m) => (sentIds.has(m.id) ? { ...m, retryCount: m.retryCount + 1 } : m));
 
     set({ syncStatus: 'syncing' });
-    let acked: Set<string>;
-    try {
-      acked = new Set(await syncExecutor(batch));
-    } catch (error) {
-      if (__DEV__) {
-        console.warn('[sync] batch failed', error);
+    // Send bounded batches: one oversized request would be rejected forever and block the whole queue.
+    for (let start = 0; start < snapshot.length; start += SYNC_BATCH_SIZE) {
+      const batch = snapshot.slice(start, start + SYNC_BATCH_SIZE);
+      batch.forEach((m) => sentIds.add(m.id));
+      try {
+        (await syncExecutor(batch)).forEach((id) => acked.add(id));
+      } catch (error) {
+        if (__DEV__) {
+          console.warn('[sync] batch failed', error);
+        }
+        // Batches already acknowledged stay removed; this one and the unsent rest stay queued.
+        set((prev) => ({ syncStatus: 'error', syncQueue: bumpUnacked(prev.syncQueue) }));
+        await get().persistToStorage();
+        return false;
       }
-      set((prev) => ({ syncStatus: 'error', syncQueue: bumpUnacked(prev.syncQueue, new Set()) }));
-      await get().persistToStorage();
-      return false;
     }
 
-    const allAcked = batch.every((m) => acked.has(m.id));
+    const allAcked = snapshot.every((m) => acked.has(m.id));
     set((prev) => ({
       // Items enqueued while the request was in flight are kept untouched.
-      syncQueue: bumpUnacked(prev.syncQueue, acked),
+      syncQueue: bumpUnacked(prev.syncQueue),
       syncStatus: allAcked ? 'synced' : 'error',
       lastSyncedAt: allAcked ? new Date().toISOString() : prev.lastSyncedAt,
     }));
